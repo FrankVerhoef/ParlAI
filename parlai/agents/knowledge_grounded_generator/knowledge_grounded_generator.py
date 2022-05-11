@@ -5,8 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from parlai.core.torch_generator_agent import TorchGeneratorAgent
+from parlai.utils.torch import padded_tensor
 
-from parlai.agents.knowledge_grounded_generator.kg_utils import ConceptGraph, filter_directed_triple
+from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, filter_directed_triple
 from parlai.agents.knowledge_grounded_generator.multihop import KnowledgeGroundedModel
 import parlai.utils.logging as logging
 
@@ -131,21 +132,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return vocab_map, map_mask
 
 
-    def train_step(self, batch):
-        pass
-
-    # def eval_step(self, batch):
-    #     for i, ex in enumerate(batch.concept_labels):
-    #         print("Eval_Step: ", i, ex)
-    #     # for each row in batch, convert tensor to back to text strings
-    #     return Output([self.dict.vec2txt(row) for row in batch.text_vec])
-
-
     def observe(self, observation):
         logging.debug('=== Observation ===\n{}'.format(observation['text']))
-
         # Match with concepts in knowledge graph
-        concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(observation['eval_labels']))
+        concepts = self.kg.match_mentioned_concepts(
+            observation['text'], 
+            ' '.join(observation['labels'] if 'labels' in observation.keys() else observation['eval_labels']))
         # for k, v in concepts.items():
         #     print(k, v)
         related_concepts = self.kg.find_neighbours_frequency(concepts['qc'], concepts['ac'], T=2, max_B=100)[0]
@@ -185,11 +177,26 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
     def batchify(self, obs_batch, sort=False):
         batch = super().batchify(obs_batch, sort=sort)
 
-        batch['concept_ids'], _ = self._pad_tensor([obs_batch[i]['concept_ids'] for i in batch.valid_indices])
-        batch['concept_labels'], _ = self._pad_tensor([obs_batch[i]['concept_labels'] for i in batch.valid_indices])
-        batch['relations'], _ = self._pad_tensor([obs_batch[i]['relations'] for i in batch.valid_indices])
-        batch['head_ids'], _ = self._pad_tensor([obs_batch[i]['head_ids'] for i in batch.valid_indices])
-        batch['tail_ids'], _ = self._pad_tensor([obs_batch[i]['tail_ids'] for i in batch.valid_indices])
+        batch['concept_ids'], _ = padded_tensor(
+            [obs_batch[i]['concept_ids'] for i in batch.valid_indices],
+            pad_idx = self.kg.concept2id[NOCONCEPT_TOKEN]            
+        )
+        batch['concept_labels'], _ = padded_tensor(
+            [obs_batch[i]['concept_labels'] for i in batch.valid_indices],
+            pad_idx = self.kg.concept2id[NOCONCEPT_TOKEN]            
+        )
+        batch['relations'], _ = padded_tensor(
+            [obs_batch[i]['relations'] for i in batch.valid_indices], 
+            pad_idx = self.kg.relation2id[NORELATION_TOKEN]
+        )
+        batch['head_ids'], _ = padded_tensor(
+            [obs_batch[i]['head_ids'] for i in batch.valid_indices],
+            pad_idx=0
+        )
+        batch['tail_ids'], _ = padded_tensor(
+            [obs_batch[i]['tail_ids'] for i in batch.valid_indices],
+            pad_idx=0
+        )
         batch['vocab_map'] = torch.LongTensor(self.vocab_map)
         batch['map_mask'] = torch.LongTensor(self.map_mask)
 
@@ -220,7 +227,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         )
 
 
-    def compute_loss(self, batch, return_output):
+    def compute_loss(self, batch, return_output=False):
 
         """
         Compute and return the loss for the given batch.

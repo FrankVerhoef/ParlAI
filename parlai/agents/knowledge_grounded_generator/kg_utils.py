@@ -94,6 +94,8 @@ blacklist = set([
     "youre", "yours", "yr", "ys", "yt", "z", "Z", "zero", "zi", "zz"
 ])
 
+
+
 def read_csv(data_path="train/source.csv"):
     data = []
     with open(data_path, 'r') as f:
@@ -115,6 +117,9 @@ def save_json(data, filename):
             json.dump(line, f)
             f.write('\n')
 
+NOCONCEPT_TOKEN = '<NoConcept>'
+NORELATION_TOKEN = '<NoRelation>'
+
 class ConceptGraph(nx.Graph):
 
     def __init__(self, concepts, relations, total_concepts, graph):
@@ -126,8 +131,8 @@ class ConceptGraph(nx.Graph):
 
     def load_resources(self, concepts, relations):
 
-        concept2id = {}
-        id2concept = {}
+        concept2id = {NOCONCEPT_TOKEN: 0}
+        id2concept = {0: NOCONCEPT_TOKEN}
         cpnet_vocab = []
         with open(concepts, "r", encoding="utf8") as f:
             for line in f.readlines():
@@ -140,14 +145,14 @@ class ConceptGraph(nx.Graph):
         self.vocab = set([c.replace("_", " ") for c in cpnet_vocab])
         logging.debug("Loaded {} concepts".format(len(self.concept2id)))
 
-        id2relation = {}
-        relation2id = {}
+        id2relation = {0: NORELATION_TOKEN}
+        relation2id = {NORELATION_TOKEN: 0}
         with open(relations, "r", encoding="utf8") as f:
             for w in f.readlines():
                 id2relation[len(id2relation)] = w.strip()
                 relation2id[w.strip()] = len(relation2id)
         l = len(relation2id)
-        for i in range(l):
+        for i in range(1, len(relation2id)):        # Skip <NoRelation>
             reverse = 'reverse_' + id2relation[i]
             id2relation[len(id2relation)] = reverse
             relation2id[reverse] = len(relation2id)
