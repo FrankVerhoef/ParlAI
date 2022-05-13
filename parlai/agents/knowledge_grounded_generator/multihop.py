@@ -126,7 +126,7 @@ class KnowledgeGroundedDecoder(nn.Module):
 
     def forward(self, decoder_input, encoder_state, incr_state=None):
 
-        logging.debug("Forward KnowledgeGroundedDecoder")
+        #logging.debug("Forward KnowledgeGroundedDecoder")
 
         if incr_state is None:
             input_ids, concept_ids, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_state
@@ -175,6 +175,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         triple_prob = sigmoid(triple_logits)
         # bsz x L x mem_t
 
+        """
         # Aggregate probability to nodes
         unorm_cpt_probs = self.multi_hop(
             memory_dict['concepts'],
@@ -189,11 +190,12 @@ class KnowledgeGroundedDecoder(nn.Module):
         cpt_probs_vocab = cpt_probs.gather(2, index)
         mask = (memory_dict["map_mask"] == 0).unsqueeze(0).unsqueeze(0)
         cpt_probs_vocab.masked_fill_(mask, 0)
-
+        """
         # Determine gate value (which determines whether to take token from language model or select a concept)
         gate = sigmoid(self.gate_linear(hidden_states))
 
-        probs = gate * cpt_probs_vocab + (1 - gate) * lm_probs 
+        probs = lm_probs # DEBUG: temporarily just use LM probabilities for testing
+        # probs = gate * cpt_probs_vocab + (1 - gate) * lm_probs 
 
         return probs, gpt_states
 
