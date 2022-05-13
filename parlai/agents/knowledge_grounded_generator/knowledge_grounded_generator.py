@@ -11,6 +11,24 @@ from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN,
 from parlai.agents.knowledge_grounded_generator.multihop import KnowledgeGroundedModel
 import parlai.utils.logging as logging
 
+class KG_loss(nn.Module):
+
+    def __init__(self, ignore_index):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.gen_loss_fn = nn.NLLLoss(ignore_index=ignore_index)
+
+    def forward(self, hybrid_probs, labels):
+
+        hybrid_probs_clamp = hybrid_probs.clamp(min=1e-5)
+        gen_loss = self.gen_loss_fn(hybrid_probs_clamp.log().view(-1, hybrid_probs.size(-1)), labels.view(-1))
+        assert(not torch.isinf(gen_loss).any().item())
+
+        loss = gen_loss
+        logging.debug("Loss = {:5.3f} for probs {} and label {}".format(loss, hybrid_probs.shape, labels.shape))
+        return loss   
+
+
 class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
     @classmethod
@@ -259,19 +277,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         """
         Construct and return the loss function.
         """
-        return self.KG_loss
+        return KG_loss(ignore_index=self.NULL_IDX)
 
-
-    def KG_loss(self, hybrid_probs, labels):
-
-        gen_loss_fn = nn.NLLLoss(ignore_index=-1)
-        hybrid_probs_clamp = hybrid_probs.clamp(min=1e-5)
-        gen_loss = gen_loss_fn(hybrid_probs_clamp.log().view(-1, hybrid_probs.size(-1)), labels.view(-1))
-        assert(not torch.isinf(gen_loss).any().item())
-
-        loss = gen_loss
-        
-        return loss
 
 #    def KG_loss(self, hybrid_probs, labels, gate, gate_mask, gate_label, triple_score, triple_label):
 
