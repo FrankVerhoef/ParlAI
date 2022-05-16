@@ -18,14 +18,14 @@ class KG_loss(nn.Module):
         self.ignore_index = ignore_index
         self.gen_loss_fn = nn.NLLLoss(ignore_index=ignore_index)
 
-    def forward(self, hybrid_probs, labels):
+    def forward(self, probs, labels):
 
-        hybrid_probs_clamp = hybrid_probs.clamp(min=1e-5)
-        gen_loss = self.gen_loss_fn(hybrid_probs_clamp.log().view(-1, hybrid_probs.size(-1)), labels.view(-1))
+        probs_clamp = probs.clamp(min=1e-5)
+        gen_loss = self.gen_loss_fn(probs_clamp.log().view(-1, probs.size(-1)), labels.view(-1))
         assert(not torch.isinf(gen_loss).any().item())
 
         loss = gen_loss
-        logging.debug("Loss = {:5.3f} for probs {} and label {}".format(loss, hybrid_probs.shape, labels.shape))
+        logging.debug("Loss = {:5.3f} for probs {} and label {}".format(loss, probs.shape, labels.shape))
         return loss   
 
 
@@ -203,6 +203,10 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             [obs_batch[i]['concept_labels'] for i in batch.valid_indices],
             pad_idx = self.kg.concept2id[NOCONCEPT_TOKEN]            
         )
+        batch['distances'], _ = padded_tensor(
+            [obs_batch[i]['distances'] for i in batch.valid_indices],
+            pad_idx=0
+        )
         batch['relations'], _ = padded_tensor(
             [obs_batch[i]['relations'] for i in batch.valid_indices], 
             pad_idx = self.kg.relation2id[NORELATION_TOKEN]
@@ -229,6 +233,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return (
             batch.text_vec,
             batch.concept_ids,
+            batch.distances,
             batch.relations,
             batch.head_ids,
             batch.tail_ids,

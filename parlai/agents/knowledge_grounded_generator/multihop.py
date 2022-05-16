@@ -12,21 +12,20 @@ import parlai.utils.logging as logging
 class Identity(nn.Module):
     def forward(self, *batch):
         return tuple(batch)
-    # def forward(self, text_vec, concept_ids, relations, head_ids, tail_ids, vocab_map, map_mask):
-    #     return (text_vec, concept_ids, relations, head_ids, tail_ids, vocab_map, map_mask)
 
 
 class TripleEncoder(nn.Module):
 
-    def __init__(self, embedding, num_hops, emb_size):
+    def __init__(self, embedding, num_hops):
         super().__init__()
 
+        E = embedding.weight.shape[-1]
         self.num_hops = num_hops
         self.concept_embd = embedding
-        self.relation_embd = nn.Embedding(40, emb_size)
-        self.W_s = nn.ModuleList([nn.Linear(emb_size, emb_size, bias=False) for _ in range(self.num_hops)]) 
-        self.W_n = nn.ModuleList([nn.Linear(emb_size, emb_size, bias=False) for _ in range(self.num_hops)]) 
-        self.W_r = nn.ModuleList([nn.Linear(emb_size, emb_size, bias=False) for _ in range(self.num_hops)])
+        self.relation_embd = nn.Embedding(40, E)
+        self.W_s = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)]) 
+        self.W_n = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)]) 
+        self.W_r = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)])
 
         logging.info("Initialized TripleEncoder")
 
@@ -34,14 +33,14 @@ class TripleEncoder(nn.Module):
         """
         Encodes knowledge triples
         Tensor sizes are:
-            B x L1: for concept_ids
-            B x L2: for relations, head_ids, tail_ids
-            B x L2 x E: for output (triple representation)
+            B, L1: for concept_ids
+            B, L2: for relations, head_ids, tail_ids
+            B, L2, 3 x E: for output (triple representation)
 
             B = batch size
             L1 = number of related concepts (can vary per batch)
             L2 = number of related triples (can vary per batch)
-            E = 
+            E = embedding dimension for concepts (is same as embedding dim for relations)
         """
         logging.debug("Forward TripleEncoder")
         logging.debug("\tEncoding {} concepts and {} relations".format(concept_ids.size(1), relations.size(1)))
@@ -64,10 +63,11 @@ class TripleEncoder(nn.Module):
         return triple_repr
 
     def multi_layer_comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids, layer_number=2):
+        concept_hidden, relation_hidden = concept_repr, rel_repr
         for i in range(layer_number):
             concept_hidden, relation_hidden = self.comp_gcn(
-                concept_repr, 
-                rel_repr, 
+                concept_hidden, 
+                relation_hidden, 
                 head_ids, 
                 tail_ids, 
                 i
@@ -76,8 +76,9 @@ class TripleEncoder(nn.Module):
 
     def comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids,  layer_idx):
         '''
-        concept_repr: B x M x E
-        rel_repr: B x Mt x E
+        concept_repr: B x M x E  (M=max number of related concepts)
+        rel_repr: B x Mt x E (Mt=max number of triples)
+        TODO: implement masking in case batch size != 1
         '''
         B = head_ids.size(0)
         Mt = head_ids.size(1)
@@ -88,12 +89,16 @@ class TripleEncoder(nn.Module):
         count = torch.ones_like(head_ids).to(head_ids.device).float()
         count_out = torch.zeros(B, M).to(head_ids.device).float()
 
+        # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
         o = concept_repr.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
         scatter_add(o, tail_ids, dim=1, out=update_node)
+        scatter_add(-rel_repr, tail_ids, dim=1, out=update_node)
         scatter_add(count, tail_ids, dim=1, out=count_out)
 
+        # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
         o = concept_repr.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
         scatter_add(o, head_ids, dim=1, out=update_node)
+        scatter_add(-rel_repr, head_ids, dim=1, out=update_node)
         scatter_add(count, head_ids, dim=1, out=count_out)
 
         act = nn.ReLU()
@@ -117,7 +122,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         self.lm_head = nn.Linear(opt['embedding_size'], len(dict.keys()), bias=False)
         self.lm_head.weight = self.gpt2model.transformer.wte.weight
 
-        self.triple_encoder = TripleEncoder(self.gpt2model.transformer.wte, self.num_hops, opt['embedding_size'])
+        self.triple_encoder = TripleEncoder(self.gpt2model.transformer.wte, self.num_hops)
         self.triple_linear = nn.Linear(opt['embedding_size'] * 3, opt['embedding_size'], bias=False)
         self.gate_linear = nn.Linear(opt['embedding_size'], 1)
 
@@ -129,18 +134,19 @@ class KnowledgeGroundedDecoder(nn.Module):
         #logging.debug("Forward KnowledgeGroundedDecoder")
 
         if incr_state is None:
-            input_ids, concept_ids, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_state
+            input_ids, concept_ids, distances, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_state
             gpt_states = None
             triple_repr = self.triple_encoder(concept_ids, relations, head_ids, tail_ids)
         else:
-            input_ids, gpt_states, concept_ids, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask = incr_state
+            input_ids, gpt_states, concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask = incr_state
 
-        probs, gpt_states = self.knowledge_grounded_probs(
+        (probs, gate, triple_prob), gpt_states = self.knowledge_grounded_probs(
             decoder_input, 
             input_ids,
             gpt_states,
             memory_dict={
                 "concepts": concept_ids,
+                "distances": distances,
                 "relations": relations,
                 "triple_repr": triple_repr,
                 "head": head_ids,
@@ -149,14 +155,14 @@ class KnowledgeGroundedDecoder(nn.Module):
                 "map_mask": map_mask
             }
         )
-        return probs, (input_ids, gpt_states, concept_ids, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask)
+        return probs, (input_ids, gpt_states, concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask)
 
 
     def knowledge_grounded_probs(self, decoder_input, input_ids, gpt_states, memory_dict):
         '''
         return: 
-            - probs: bsz x L x vocab
-            - gate: bsz x L x 1
+            - probs: B x L x V
+            - gate: B x L x 1
         '''
 
         sigmoid = nn.Sigmoid()
@@ -173,82 +179,77 @@ class KnowledgeGroundedDecoder(nn.Module):
             self.triple_linear(memory_dict["triple_repr"]).transpose(1, 2)
         )
         triple_prob = sigmoid(triple_logits)
-        # bsz x L x mem_t
+        # B x L x Mt
 
-        """
         # Aggregate probability to nodes
-        unorm_cpt_probs = self.multi_hop(
+        concept_scores = self.multi_hop(
             memory_dict['concepts'],
             triple_prob, 
+            memory_dict["distances"],
             memory_dict["head"], 
             memory_dict["tail"]
         )
+        concept_probs = softmax(concept_scores)
 
         # Calculate probability for concepts
-        cpt_probs = softmax(unorm_cpt_probs)
-        index = memory_dict["vocab_map"].unsqueeze(0).unsqueeze(0).expand(cpt_probs.size(0), cpt_probs.size(1), -1)
-        cpt_probs_vocab = cpt_probs.gather(2, index)
+        index = memory_dict["vocab_map"].unsqueeze(0).unsqueeze(0).expand(concept_probs.size(0), concept_probs.size(1), -1)
+        concept_probs_vocab = concept_probs.gather(2, index)
         mask = (memory_dict["map_mask"] == 0).unsqueeze(0).unsqueeze(0)
-        cpt_probs_vocab.masked_fill_(mask, 0)
-        """
+        concept_probs_vocab.masked_fill_(mask, 0)
+
         # Determine gate value (which determines whether to take token from language model or select a concept)
         gate = sigmoid(self.gate_linear(hidden_states))
 
         probs = lm_probs # DEBUG: temporarily just use LM probabilities for testing
         # probs = gate * cpt_probs_vocab + (1 - gate) * lm_probs 
 
-        return probs, gpt_states
+        return (probs, gate, triple_prob), gpt_states
 
 
-    def multi_hop(self, concepts, triple_prob, head, tail):
+    def multi_hop(self, concepts, triple_prob, distance, head, tail):
         '''
-        triple_prob: bsz x L x mem_t
-        distance: bsz x mem
-        head, tail: bsz x mem_t
-        concept_label: bsz x mem
-        triple_label: bsz x mem_t
-
-        Init binary vector with source concept == 1 and others 0
-        expand to size: bsz x L x mem
+        triple_prob: B x L x Mt
+        distance: B x M
+        head, tail: B x Mt
+        concept_label: B x M
+        triple_label: B x Mt
         '''
-        concept_probs = []
+        
+        # Init binary vector with source concept == 1 and others 0, and expand to size B, L, M
+        concept_scores = []
         concept_size = (triple_prob.size(0), triple_prob.size(1), concepts.size(1))
-        init_mask = torch.ones_like(concepts).unsqueeze(1).expand(*concept_size).to(concepts.device).float()
-        concept_probs.append(init_mask)
+        init_mask = torch.zeros_like(concepts).unsqueeze(1).expand(*concept_size).to(concepts.device).float()
+        init_mask.masked_fill_((distance == 0).unsqueeze(1), 1)
+        concept_scores.append(init_mask)
 
         head = head.unsqueeze(1).expand(triple_prob.size(0), triple_prob.size(1), -1)
         tail = tail.unsqueeze(1).expand(triple_prob.size(0), triple_prob.size(1), -1)
 
-        for step in range(self.num_hops):
-            '''
-            Calculate triple head score
-            '''
-            node_score = concept_probs[-1]
+        for _ in range(self.num_hops):
 
+            # Calculate triple head score
+            node_score = concept_scores[-1]
             triple_head_score = node_score.gather(2, head)
-            '''
-            Method: 
-                - avg:
-                    s(v) = Avg_{u \in N(v)} gamma * s(u) + R(u->v) 
-                - max: 
-                    s(v) = max_{u \in N(v)} gamma * s(u) + R(u->v)
-            '''
-            update_value = triple_head_score * self.gamma + triple_prob
+            
+            # Aggregate scores to tail nodes: [CHANGED TO MULTIPLICATION]
+            # - avg: score(tail) = avg_{head \in N(tail)} gamma * score(head) + p(head -> tail) 
+            # - max: score(tail) = max_{head \in N(tail)} gamma * score(head) + p(head -> tail)
+            update_value = triple_head_score * self.gamma * triple_prob
             out = torch.zeros_like(node_score).to(node_score.device).float()
             if self.aggregate_method == "max":
                 scatter_max(update_value, tail, dim=-1, out=out)
             elif self.aggregate_method == "avg":
                 scatter_mean(update_value, tail, dim=-1, out=out)           
-            concept_probs.append(out)
+            concept_scores.append(out)
         
-        '''
-        Natural decay of concept that is multi-hop away from source
-        '''
-        total_concept_prob = torch.zeros_like(node_score)
-        for prob in concept_probs[1:]:
-            total_concept_prob += prob
-        # bsz x L x mem
-        return total_concept_prob
+        # Assign large negative value to start-nodes
+        # Use natural decay of concept that is multi-hop away from source
+        total_concept_score = init_mask * -1e5 # torch.zeros_like(node_score)
+        for score in concept_scores[1:]:
+            total_concept_score += score * 0.8 ** distance
+        # B x L x M
+
+        return total_concept_score
 
 
 class KnowledgeGroundedModel(TorchGeneratorModel):
@@ -264,13 +265,13 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
         return dict.null_idx, dict.start_idx, dict.end_idx
 
     def reorder_encoder_states(self, encoder_states, indices):
-        input_ids, concept_ids, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_states
-        return (input_ids[:, indices], concept_ids, relations, head_ids, tail_ids, vocab_map, map_mask)
+        input_ids, concept_ids, distances, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_states
+        return (input_ids[:, indices], concept_ids, distances, relations, head_ids, tail_ids, vocab_map, map_mask)
 
 
     def reorder_decoder_incremental_state(self, incr_state, indices):
 
-        input_ids, gpt_states, concept_ids, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask = incr_state
+        input_ids, gpt_states, concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask = incr_state
         new_gpt_state = []
         for layer_past in gpt_states:
             if torch.is_tensor(layer_past):
@@ -281,11 +282,12 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
                 layer_past = torch.stack(layer_past, dim=0)
                 new_gpt_state.append(torch.index_select(layer_past, 1, indices))
 
-        return (input_ids[:, indices], tuple(new_gpt_state), concept_ids, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask)
+        return (input_ids[:, indices], tuple(new_gpt_state), concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask)
 
 
     def output(self, decoder_output):
-        return decoder_output
+        probs = decoder_output
+        return probs
 
 
     def decode_forced(self, encoder_states, ys):
