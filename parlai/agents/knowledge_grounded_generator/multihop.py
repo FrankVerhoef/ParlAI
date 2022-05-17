@@ -3,8 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch_scatter import scatter_max, scatter_mean, scatter_add
-from parlai.agents.hugging_face.gpt2 import GPT2Decoder, HFGPT2Model
-from parlai.agents.transformer.modules.encoder import TransformerEncoder
+from parlai.agents.hugging_face.gpt2 import GPT2Decoder
 from parlai.core.torch_generator_agent import TorchGeneratorModel
 import parlai.utils.logging as logging
 
@@ -114,16 +113,20 @@ class KnowledgeGroundedDecoder(nn.Module):
 
     def __init__(self, opt, dict):
         super().__init__()
-        self.num_hops = opt['num_hops']
-        self.gamma = opt['gamma']
-        self.aggregate_method = opt['aggregate_method']
 
+        # Model and parameters for language model
         self.gpt2model = GPT2Decoder(opt, dict)
         self.lm_head = nn.Linear(opt['embedding_size'], len(dict.keys()), bias=False)
         self.lm_head.weight = self.gpt2model.transformer.wte.weight
 
+        # Model and parameters for knowledge model
+        self.num_hops = opt['num_hops']
+        self.gamma = opt['gamma']
+        self.aggregate_method = opt['aggregate_method']
         self.triple_encoder = TripleEncoder(self.gpt2model.transformer.wte, self.num_hops)
         self.triple_linear = nn.Linear(opt['embedding_size'] * 3, opt['embedding_size'], bias=False)
+
+        # Gate to control use generation via language model or knowledge model
         self.gate_linear = nn.Linear(opt['embedding_size'], 1)
 
         logging.info("Initialized KnowledgeGroundedDecoder")
@@ -134,28 +137,42 @@ class KnowledgeGroundedDecoder(nn.Module):
         #logging.debug("Forward KnowledgeGroundedDecoder")
 
         if incr_state is None:
-            input_ids, concept_ids, distances, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_state
+            (
+                input_ids, 
+                concept_ids, distances, relations, head_ids, tail_ids, triple_labels, gate_labels, 
+                vocab_map, map_mask 
+            ) = encoder_state
             gpt_states = None
             triple_repr = self.triple_encoder(concept_ids, relations, head_ids, tail_ids)
         else:
-            input_ids, gpt_states, concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask = incr_state
+            (
+                input_ids, gpt_states, 
+                distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels, 
+                vocab_map, map_mask, triple_prob, gate
+            ) = incr_state
 
         (probs, gate, triple_prob), gpt_states = self.knowledge_grounded_probs(
             decoder_input, 
             input_ids,
             gpt_states,
             memory_dict={
-                "concepts": concept_ids,
                 "distances": distances,
-                "relations": relations,
                 "triple_repr": triple_repr,
                 "head": head_ids,
                 "tail": tail_ids,
+                "triple_labels": triple_labels,
                 "vocab_map": vocab_map,
                 "map_mask": map_mask
             }
         )
-        return probs, (input_ids, gpt_states, concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask)
+
+        incr_state = (
+            input_ids, gpt_states, 
+            distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels,
+            vocab_map, map_mask, triple_prob, gate
+        )
+
+        return probs, incr_state
 
 
     def knowledge_grounded_probs(self, decoder_input, input_ids, gpt_states, memory_dict):
@@ -179,11 +196,12 @@ class KnowledgeGroundedDecoder(nn.Module):
             self.triple_linear(memory_dict["triple_repr"]).transpose(1, 2)
         )
         triple_prob = sigmoid(triple_logits)
+        invalid_mask = (memory_dict["triple_labels"] == -1).unsqueeze(1)
+        triple_prob = triple_prob.masked_fill(invalid_mask, 0)
         # B x L x Mt
 
         # Aggregate probability to nodes
         concept_scores = self.multi_hop(
-            memory_dict['concepts'],
             triple_prob, 
             memory_dict["distances"],
             memory_dict["head"], 
@@ -194,8 +212,8 @@ class KnowledgeGroundedDecoder(nn.Module):
         # Calculate probability for concepts
         index = memory_dict["vocab_map"].unsqueeze(0).unsqueeze(0).expand(concept_probs.size(0), concept_probs.size(1), -1)
         concept_probs_vocab = concept_probs.gather(2, index)
-        mask = (memory_dict["map_mask"] == 0).unsqueeze(0).unsqueeze(0)
-        concept_probs_vocab.masked_fill_(mask, 0)
+        invalid_mask = (memory_dict["map_mask"] == 0).unsqueeze(0).unsqueeze(0)
+        concept_probs_vocab.masked_fill_(invalid_mask, 0)
 
         # Determine gate value (which determines whether to take token from language model or select a concept)
         gate = sigmoid(self.gate_linear(hidden_states))
@@ -206,7 +224,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         return (probs, gate, triple_prob), gpt_states
 
 
-    def multi_hop(self, concepts, triple_prob, distance, head, tail):
+    def multi_hop(self, triple_prob, distance, head, tail):
         '''
         triple_prob: B x L x Mt
         distance: B x M
@@ -217,8 +235,8 @@ class KnowledgeGroundedDecoder(nn.Module):
         
         # Init binary vector with source concept == 1 and others 0, and expand to size B, L, M
         concept_scores = []
-        concept_size = (triple_prob.size(0), triple_prob.size(1), concepts.size(1))
-        init_mask = torch.zeros_like(concepts).unsqueeze(1).expand(*concept_size).to(concepts.device).float()
+        concept_size = (triple_prob.size(0), triple_prob.size(1), distance.size(1))
+        init_mask = torch.zeros_like(distance).unsqueeze(1).expand(*concept_size).to(distance.device).float()
         init_mask.masked_fill_((distance == 0).unsqueeze(1), 1)
         concept_scores.append(init_mask)
 
@@ -231,10 +249,10 @@ class KnowledgeGroundedDecoder(nn.Module):
             node_score = concept_scores[-1]
             triple_head_score = node_score.gather(2, head)
             
-            # Aggregate scores to tail nodes: [CHANGED TO MULTIPLICATION]
-            # - avg: score(tail) = avg_{head \in N(tail)} gamma * score(head) + p(head -> tail) 
-            # - max: score(tail) = max_{head \in N(tail)} gamma * score(head) + p(head -> tail)
-            update_value = triple_head_score * self.gamma * triple_prob
+            # Aggregate scores to tail nodes
+            # avg: score(tail) = avg_{head \in N(tail)} gamma * score(head) + p(head -> tail) 
+            # max: score(tail) = max_{head \in N(tail)} gamma * score(head) + p(head -> tail)
+            update_value = triple_head_score * self.gamma + triple_prob
             out = torch.zeros_like(node_score).to(node_score.device).float()
             if self.aggregate_method == "max":
                 scatter_max(update_value, tail, dim=-1, out=out)
@@ -243,7 +261,7 @@ class KnowledgeGroundedDecoder(nn.Module):
             concept_scores.append(out)
         
         # Assign large negative value to start-nodes
-        # Use natural decay of concept that is multi-hop away from source
+        # Apply decay factor for concept scores that are further away from source
         total_concept_score = init_mask * -1e5 # torch.zeros_like(node_score)
         for score in concept_scores[1:]:
             total_concept_score += score * 0.8 ** distance
@@ -264,14 +282,32 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
     def _get_special_tokens(self, opt, dict):
         return dict.null_idx, dict.start_idx, dict.end_idx
 
+
+
+    def forward(self, *xs, ys=None, prev_enc=None, maxlen=None, bsz=None):
+        """
+        Get output predictions from the model.
+        """
+        assert ys is not None, "Greedy decoding in TGModel.forward no longer supported."
+
+        self.longest_label = max(self.longest_label, ys.size(1))
+
+        # use cached encoding if available
+        encoder_states = prev_enc if prev_enc is not None else self.encoder(*xs)
+
+        # use teacher forcing
+        scores, preds, triple_probs, gate = self.decode_forced(encoder_states, ys)
+        return scores, preds, encoder_states, triple_probs, gate
+        
+
     def reorder_encoder_states(self, encoder_states, indices):
-        input_ids, concept_ids, distances, relations, head_ids, tail_ids, vocab_map, map_mask = encoder_states
-        return (input_ids[:, indices], concept_ids, distances, relations, head_ids, tail_ids, vocab_map, map_mask)
+        input_ids, *other_state_values = encoder_states
+        return (input_ids[:, indices], *other_state_values)
 
 
     def reorder_decoder_incremental_state(self, incr_state, indices):
 
-        input_ids, gpt_states, concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask = incr_state
+        input_ids, gpt_states, *other_state_values = incr_state
         new_gpt_state = []
         for layer_past in gpt_states:
             if torch.is_tensor(layer_past):
@@ -282,7 +318,7 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
                 layer_past = torch.stack(layer_past, dim=0)
                 new_gpt_state.append(torch.index_select(layer_past, 1, indices))
 
-        return (input_ids[:, indices], tuple(new_gpt_state), concept_ids, distances, relations, triple_repr, head_ids, tail_ids, vocab_map, map_mask)
+        return (input_ids[:, indices], tuple(new_gpt_state), *other_state_values)
 
 
     def output(self, decoder_output):
@@ -298,9 +334,14 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
             return super().decode_forced(encoder_states, ys)
         seqlen = ys.size(1)
         inputs = ys.narrow(1, 0, seqlen - 1)
-        latent, _ = self.decoder(inputs, encoder_states)
+        latent, final_state = self.decoder(inputs, encoder_states)
+        (
+            input_ids, gpt_states, 
+            distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels, 
+            vocab_map, map_mask, triple_prob, gate
+        ) = final_state
         logits = self.output(latent)
         _, preds = logits.max(dim=2)
-        return logits, preds
+        return logits, preds, triple_prob, gate
 
 
