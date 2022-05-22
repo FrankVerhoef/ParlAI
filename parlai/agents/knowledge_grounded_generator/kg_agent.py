@@ -7,7 +7,7 @@ from parlai.utils.torch import padded_tensor
 from parlai.core.metrics import AverageMetric
 
 from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, filter_directed_triple
-from parlai.agents.knowledge_grounded_generator.multihop import KnowledgeGroundedModel
+from parlai.agents.knowledge_grounded_generator.kg_model import KnowledgeGroundedModel
 import parlai.utils.logging as logging
 
 class KG_loss(nn.Module):
@@ -317,5 +317,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
     def build_criterion(self):
         """
         Construct and return the loss function.
+        Uses parameters alpha and beta to determine how much of gate loss (x alpha) and triple loss (x beta)
+        is added to the final loss
         """
         return KG_loss(ignore_index=self.NULL_IDX, invalid=-1, alpha = self.opt['alpha'], beta = self.opt['beta'])

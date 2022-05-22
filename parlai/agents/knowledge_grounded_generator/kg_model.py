@@ -25,34 +25,41 @@ class TripleEncoder(nn.Module):
         self.W_s = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)]) 
         self.W_n = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)]) 
         self.W_r = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)])
+        self.act = nn.ReLU()
 
         logging.info("Initialized TripleEncoder")
+
 
     def forward(self, concept_ids, relations, head_ids, tail_ids):
         """
         Encodes knowledge triples
         Tensor sizes are:
-            B, L1: for concept_ids
-            B, L2: for relations, head_ids, tail_ids
-            B, L2, 3 x E: for output (triple representation)
+            B, M: for concept_ids
+            B, Mt: for relations, head_ids, tail_ids
+            B, Mt, 3 x E: for output (triple representation)
 
             B = batch size
-            L1 = number of related concepts (can vary per batch)
-            L2 = number of related triples (can vary per batch)
+            M = number of related concepts (can vary per batch)
+            Mt = number of related triples (can vary per batch)
             E = embedding dimension for concepts (is same as embedding dim for relations)
         """
         logging.debug("Forward TripleEncoder")
         logging.debug("\tEncoding {} concepts and {} relations".format(concept_ids.size(1), relations.size(1)))
 
+        # Embed concepts and relations
         concept_repr = self.concept_embd(concept_ids)
         rel_repr = self.relation_embd(relations)
-        node_repr, rel_repr = self.multi_layer_comp_gcn(
+
+        # Calculate GCN representations for concepts and relations, using 'num_hops' layers
+        node_repr, rel_repr = self.comp_gcn(
             concept_repr, 
             rel_repr,
             head_ids,
             tail_ids,
             layer_number=self.num_hops
         )
+
+        # Construct triple representation
         head_repr = torch.gather(node_repr, 1, head_ids.unsqueeze(-1).expand(node_repr.size(0), head_ids.size(1), node_repr.size(-1)))
         tail_repr = torch.gather(node_repr, 1, tail_ids.unsqueeze(-1).expand(node_repr.size(0), tail_ids.size(1), node_repr.size(-1)))
         triple_repr = torch.cat((head_repr, rel_repr, tail_repr), dim=-1)
@@ -61,52 +68,47 @@ class TripleEncoder(nn.Module):
 
         return triple_repr
 
-    def multi_layer_comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids, layer_number=2):
-        concept_hidden, relation_hidden = concept_repr, rel_repr
-        for i in range(layer_number):
-            concept_hidden, relation_hidden = self.comp_gcn(
-                concept_hidden, 
-                relation_hidden, 
-                head_ids, 
-                tail_ids, 
-                i
-            )
-        return concept_hidden, relation_hidden
 
-    def comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids,  layer_idx):
+    def comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids, layer_number=2):
         '''
         concept_repr: B x M x E  (M=max number of related concepts)
         rel_repr: B x Mt x E (Mt=max number of triples)
         TODO: implement masking in case batch size != 1
         '''
+
         B = head_ids.size(0)
         Mt = head_ids.size(1)
         M = concept_repr.size(1)
         E = concept_repr.size(2)
 
-        update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
-        count = torch.ones_like(head_ids).to(head_ids.device).float()
-        count_out = torch.zeros(B, M).to(head_ids.device).float()
+        concept_hidden, relation_hidden = concept_repr, rel_repr
+        for l in range(layer_number):
 
-        # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
-        o = concept_repr.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
-        scatter_add(o, tail_ids, dim=1, out=update_node)
-        scatter_add(-rel_repr, tail_ids, dim=1, out=update_node)
-        scatter_add(count, tail_ids, dim=1, out=count_out)
+            # Initialise update_node for GCN calculation
+            update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
+            count = torch.ones_like(head_ids).to(head_ids.device).float()
+            count_out = torch.zeros(B, M).to(head_ids.device).float()
 
-        # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
-        o = concept_repr.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
-        scatter_add(o, head_ids, dim=1, out=update_node)
-        scatter_add(-rel_repr, head_ids, dim=1, out=update_node)
-        scatter_add(count, head_ids, dim=1, out=count_out)
+            # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
+            o = concept_repr.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
+            scatter_add(o, tail_ids, dim=1, out=update_node)
+            scatter_add(-rel_repr, tail_ids, dim=1, out=update_node)
+            scatter_add(count, tail_ids, dim=1, out=count_out)
 
-        act = nn.ReLU()
-        update_node = \
-            self.W_s[layer_idx](concept_repr) + \
-            self.W_n[layer_idx](update_node) / count_out.clamp(min=1).unsqueeze(2)
-        update_node = act(update_node)
+            # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
+            o = concept_repr.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
+            scatter_add(o, head_ids, dim=1, out=update_node)
+            scatter_add(-rel_repr, head_ids, dim=1, out=update_node)
+            scatter_add(count, head_ids, dim=1, out=count_out)
 
-        return update_node, self.W_r[layer_idx](rel_repr)
+            # Combine calculated update to form new node and relation representations
+            update_node = \
+                self.W_s[l](concept_repr) + \
+                self.W_n[l](update_node) / count_out.clamp(min=1).unsqueeze(2)
+            concept_hidden = self.act(update_node)
+            relation_hidden = self.W_r[l](rel_repr)
+
+        return concept_hidden, relation_hidden
 
 
 class KnowledgeGroundedDecoder(nn.Module):
@@ -126,7 +128,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         self.triple_encoder = TripleEncoder(self.gpt2model.transformer.wte, self.num_hops)
         self.triple_linear = nn.Linear(opt['embedding_size'] * 3, opt['embedding_size'], bias=False)
 
-        # Gate to control use generation via language model or knowledge model
+        # Gate to control generation via language model or knowledge model
         self.gate_linear = nn.Linear(opt['embedding_size'], 1)
 
         logging.info("Initialized KnowledgeGroundedDecoder")
@@ -218,8 +220,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         # Determine gate value (which determines whether to take token from language model or select a concept)
         gate = sigmoid(self.gate_linear(hidden_states))
 
-        probs = lm_probs # DEBUG: temporarily just use LM probabilities for testing
-        # probs = gate * cpt_probs_vocab + (1 - gate) * lm_probs 
+        probs = gate * concept_probs_vocab + (1 - gate) * lm_probs 
 
         return (probs, gate, triple_prob), gpt_states
 
