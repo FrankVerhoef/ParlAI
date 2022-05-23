@@ -166,8 +166,8 @@ class ConceptGraph(nx.Graph):
 
         with open(concepts_path, 'r') as f:
             total_concepts = [line[:-1] for line in f]
-        self.dataset_concepts_id = [self.concept2id[c] for c in total_concepts]
-        logging.debug("Loaded {} data concepts".format(len(self.dataset_concepts_id)))
+        self.dataset_concept2id = [self.concept2id[c] for c in total_concepts]
+        logging.debug("Loaded {} data concepts".format(len(self.dataset_concept2id)))
 
 
     def load_knowledge_graph(self, graph_path):
@@ -206,8 +206,9 @@ class ConceptGraph(nx.Graph):
         # TODO: Need to think about how to match words with ConceptNet vocab and GPT2 vocab
         # ConceptNet: probably convert to lowercase and 
         # GPT2: Uses BPE tokenizer, so no unknown words. But it does have differences between uppercase/lowercase
-        # and also distinguishes between wordparts IN a sentence and words with space before
+        # and also distinguishes between wordparts IN a sentence and words with space before. Examples:
         # tokenize 'read' != ' read'
+        # 'father in law' is 1 concept in ConceptNet, but three tokens in GPT2
 
         # print("Hard ground <{}>".format(sent))
 
@@ -242,23 +243,23 @@ class ConceptGraph(nx.Graph):
             return []
 
 
-    def find_neighbours_frequency(self, source_concepts, target_concepts, T, max_B=100):
+    def find_neighbours(self, source_concepts, target_concepts, num_hops, max_B=100):
         """
             Find ...
         """
         logging.debug("Finding neighbours for {} and {}".format(source_concepts, target_concepts))
-        source = [self.concept2id[s_cpt] for s_cpt in source_concepts]  # id's of the source concepts
+        source = [self.concept2id[s_cpt] for s_cpt in source_concepts]  # id's in knowledge graph of the source concepts 
         start = source                              # start init contains id's of source concepts
-        Vts = dict([(x,0) for x in start])          # Vts init contains start indices, with distance 0
+        Vts = dict([(x,0) for x in start])          # Vts init contains id's of concepts in knowledge graph, with distance 0
         Ets = {}
-        dataset_concepts_id_set = set(self.dataset_concepts_id)
-        for t in range(T):      # T is number of hops
+        dataset_concept2id_set = set(self.dataset_concept2id)
+        for t in range(num_hops):      # T is number of hops
             V = {}
             templates = []
             for s in start:
                 if s in self.simple_graph:
                     for n in self.simple_graph[s]:       # loops through the neighbors
-                        if n not in Vts and n in dataset_concepts_id_set:
+                        if n not in Vts and n in dataset_concept2id_set:
                             if n not in Vts:
                                 if n not in V:      # if not yet reached, add to 'V' with frequency
                                     V[n] = 1
@@ -276,7 +277,7 @@ class ConceptGraph(nx.Graph):
                             
             V = list(V.items())         # convert from dict to list
             count_V = sorted(V, key=lambda x: x[1], reverse=True)[:max_B] # select most frequently visited
-            start = [x[0] for x in count_V if x[0] in dataset_concepts_id_set] # update start to the newly visited nodes
+            start = [x[0] for x in count_V if x[0] in dataset_concept2id_set] # update start to the newly visited nodes
             
             # Add nodes to Vts, with distance increased by 1
             Vts.update(dict([(x, t+1) for x in start]))
@@ -286,112 +287,112 @@ class ConceptGraph(nx.Graph):
             ))
         
         # Unclear what the purpose is of these lines. Doesn't seem to change concepts & distances
-        _concepts = list(Vts.keys())
+        _concept_ids = list(Vts.keys())
         _distances = list(Vts.values())
-        concepts = []
+        concept_ids = []
         distances = []
-        for c, d in zip(_concepts, _distances):
-            concepts.append(c)
+        for c, d in zip(_concept_ids, _distances):
+            concept_ids.append(c)
             distances.append(d)
-        assert(len(concepts) == len(distances))
+        assert(len(concept_ids) == len(distances))
         
+        # Contruct tuples with triples
         triples = []
         for v, N in Ets.items():
-            if v in concepts:
+            if v in concept_ids:
                 for u, rels in N.items():
-                    if u in concepts:
+                    if u in concept_ids:
                         triples.append((u, rels, v))
         
-        ts = [self.concept2id[t_cpt] for t_cpt in target_concepts]   #id's of target concepts
+        target_ids = [self.concept2id[t_cpt] for t_cpt in target_concepts]   #id's of nodes in the concept graph of target concepts
 
+        # Construct a list with labels; if the T-hop concept appears in target, then corresponding label is 1
         labels = []
         found_num = 0
-        for c in concepts:  # construct a list with labels; if the T-hop concept appears in target, then corresponding label is 1
-            if c in ts:
+        for c in concept_ids:  
+            if c in target_ids:
                 found_num += 1
                 labels.append(1)
             else:
                 labels.append(0)
         
-        res = [self.id2concept[x].replace("_", " ") for x in concepts]   # concept strings of concepts within T hops of source
-        triples = [
-            (
-                self.id2concept[x].replace("_", " "), 
-                y, #[self.id2relation[r] for r in y], 
-                self.id2concept[z].replace("_", " ")
-            ) for (x,y,z) in triples
-        ]
+        # Translate concept id's and relation id's back to text for interpretability
+        concepts = [self.id2concept[c] for c in concept_ids]   # concept strings of concepts within T hops of source
+        triples_text = [(self.id2concept[u], [self.id2relation[r] for r in rels], self.id2concept[v]) for (u, rels, v) in triples]
 
-        logging.debug("\tReturn {} concepts and {} triples".format(len(res), len(triples)))
-        return {"concepts":res, "labels":labels, "distances":distances, "triples":triples}, found_num, len(res)
+        logging.debug("\tReturn {} concepts and {} triples".format(len(concepts), len(triples)))
+        return {"concepts":concepts, "labels":labels, "distances":distances, "triples":triples}, found_num, len(concepts)
 
 
-def filter_directed_triple(ex, max_concepts=200, max_triples=300, max_neighbors=5):
+    def filter_directed_triple(self, related_concepts, max_concepts=64, max_triples=256, max_neighbors=8):
 
-    triple_dict = {}
-    triples = ex['triples']
-    concepts = ex['concepts']
-    labels = ex['labels']
-    distances = ex['distances']
+        concepts = related_concepts['concepts']
+        labels = related_concepts['labels']
+        distances = related_concepts['distances']
+        triples = related_concepts['triples']
 
-    for t in triples:
-        head, tail = t[0], t[-1]
-        head_id = concepts.index(head)
-        tail_id = concepts.index(tail)
-        if distances[head_id] <= distances[tail_id]:
-            if t[-1] not in triple_dict:
-                triple_dict[t[-1]] = [t]
-            else:
-                if len(triple_dict[t[-1]]) < max_neighbors:
-                    triple_dict[t[-1]].append(t)
+        concept_ids = [self.concept2id[c] for c in concepts]
 
-    starts = []
-    for l, c in zip(labels, concepts):
-        if l == 1:
-            starts.append(c)
+        triple_dict = {}
+        for t in triples:
+            head, tail = t[0], t[-1]
+            head_index = concept_ids.index(head)
+            tail_index = concept_ids.index(tail)
+            if distances[head_index] <= distances[tail_index]:
+                if t[-1] not in triple_dict:
+                    triple_dict[t[-1]] = [t]
+                else:
+                    if len(triple_dict[t[-1]]) < max_neighbors:
+                        triple_dict[t[-1]].append(t)
 
-    sources = []
-    for d, c in zip(distances, concepts):
-        if d == 0:
-            sources.append(c)
+        starts = []
+        for l, id in zip(labels, concept_ids):
+            if l == 1:
+                starts.append(id)
 
-    shortest_paths = []
-    for start in starts:
-        shortest_paths.extend(bfs(start, triple_dict, sources))
+        sources = []
+        for d, id in zip(distances, concept_ids):
+            if d == 0:
+                sources.append(id)
 
-    ground_truth_triples = []
-    for path in shortest_paths:
-        for i, n in enumerate(path[:-1]):
-            ground_truth_triples.append((n, path[i+1]))
-    ground_truth_triples_set = set(ground_truth_triples)
+        shortest_paths = []
+        for start in starts:
+            shortest_paths.extend(bfs(start, triple_dict, sources))
 
-    _triples = []
-    triple_labels = []
-    for k,v in triple_dict.items():
-        for t in v:
-            _triples.append(t)
-            if (t[-1], t[0]) in ground_truth_triples_set:
-                triple_labels.append(1)
-            else:
-                triple_labels.append(0)
+        ground_truth_triples = []
+        for path in shortest_paths:
+            for i, n in enumerate(path[:-1]):
+                ground_truth_triples.append((n, path[i+1]))
+        ground_truth_triples_set = set(ground_truth_triples)
 
-    concepts = concepts[:max_concepts]
-    _triples = _triples[:max_triples]
-    triple_labels = triple_labels[:max_triples]
+        _triples = []
+        triple_labels = []
+        for k,v in triple_dict.items():
+            for t in v:
+                _triples.append(t)
+                if (t[-1], t[0]) in ground_truth_triples_set:
+                    triple_labels.append(1)
+                else:
+                    triple_labels.append(0)
 
-    heads = []
-    tails = []
-    for triple in _triples:
-        heads.append(concepts.index(triple[0]))
-        tails.append(concepts.index(triple[-1]))
+        concepts = concepts[:max_concepts]
+        _triples = _triples[:max_triples]
+        triple_labels = triple_labels[:max_triples]
 
-    ex['relations'] = [x[1][0] for x in _triples] # Keep only one relation ???
-    ex['head_ids'] = heads
-    ex['tail_ids'] = tails
-    ex['triple_labels'] = triple_labels
-    ex.pop('triples')
-        
-    return ex
+        heads = []
+        tails = []
+        for triple in _triples:
+            heads.append(concept_ids.index(triple[0]))
+            tails.append(concept_ids.index(triple[-1]))
+
+        related_concepts['relation_ids'] = [triple[1][0] for triple in _triples] # Keep only one relation
+        related_concepts['head_idx'] = heads
+        related_concepts['tail_idx'] = tails
+        related_concepts['triple_labels'] = triple_labels
+        related_concepts.pop('triples')
+            
+        return related_concepts
+
 
 def bfs(start, triple_dict, source):
     """

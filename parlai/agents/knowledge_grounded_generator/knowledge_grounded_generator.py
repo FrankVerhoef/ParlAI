@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from parlai.utils.torch import padded_tensor
 from parlai.core.metrics import AverageMetric
 
-from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, filter_directed_triple
+from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph
 from parlai.agents.knowledge_grounded_generator.kg_model import KnowledgeGroundedModel
 import parlai.utils.logging as logging
 
@@ -89,7 +89,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             '-emb', '--embedding-size', type=int, default=768, help='Hidden size.'
         )
         group.add_argument(
-            "--source_length",
+            "--source-length",
             type=int,
             default=16,
             help="Length of input sentence."
@@ -101,10 +101,16 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             help="Number of hops in the graph to look for related concepts."
         )
         group.add_argument(
-            "--max-memory-size",
+            "--max-concepts",
             type=int,
             default=400,
             help="Maximum number of related concepts to include."
+        )
+        group.add_argument(
+            "--max-triples",
+            type=int,
+            default=800,
+            help="Maximum number of relations to include."
         )
         group.add_argument(
             "--alpha",
@@ -138,8 +144,10 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         super().__init__(opt)
 
         self.model_vocab = self.dict.keys()
-        self.max_memory_size = self.opt['max_memory_size']
-        self.kg = ConceptGraph(self.opt['concepts'], self.opt['relations'], self.opt['dataset_concepts'], self.opt['kg'])
+        self.num_hops = opt['num_hops']
+        self.max_concepts = opt['max_concepts']
+        self.max_triples = opt['max_triples']
+        self.kg = ConceptGraph(opt['concepts'], opt['relations'], opt['dataset_concepts'], opt['kg'])
         self.vocab_map, self.map_mask = self.build_vocab_map()
         logging.info("Initialized KnowledgeGroundedGeneratorAgent")
 
@@ -173,33 +181,39 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(labels))
         # for k, v in concepts.items():
         #     print(k, v)
-        related_concepts = self.kg.find_neighbours_frequency(concepts['qc'], concepts['ac'], T=2, max_B=100)[0]
+        related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)[0]
         # print("Related concepts: ")
         # for k, v in related_concepts.items():
         #     print(k, v[:10])
         
-        filtered_data = filter_directed_triple(related_concepts, max_concepts=400, max_triples=1000)
+        filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
 
         # Construct list with gate_labels
         target_concept_ids = [self.dict.txt2vec(' ' + c)[0] for c in concepts['ac']]
         label_ids = self.dict.txt2vec(labels[0])
-        gate_labels = [1 if x in target_concept_ids else 0 for x in label_ids]
+        gate_labels = [1 if x in target_concept_ids else 0 for x in label_ids] + [0] # add 0 for end-token
 
         # TODO: Think of alternative way to match concepts to tokens
+        # TODO: Truncate or pad to max number of concepts and relations
+
+        # Info about the related concepts
         observation['related_concepts'] = filtered_data['concepts']
-        observation['concept_ids'] = torch.LongTensor([self.dict.txt2vec(' ' + c)[0] for c in filtered_data['concepts']])
+        observation['concept_token_ids'] = torch.LongTensor([self.dict.txt2vec(' ' + c)[0] for c in filtered_data['concepts']])
         observation['concept_labels'] = torch.LongTensor(filtered_data['labels'])
         observation['distances'] = torch.LongTensor(filtered_data['distances'])
-        observation['relations'] = torch.LongTensor(filtered_data['relations'])
-        observation['head_ids'] = torch.LongTensor(filtered_data['head_ids'])
-        observation['tail_ids'] = torch.LongTensor(filtered_data['tail_ids'])
-        observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
         observation['gate_labels'] = torch.LongTensor(gate_labels)
+
+        # Info about relations to related concepts
+        observation['relation_ids'] = torch.LongTensor(filtered_data['relation_ids'])
+        observation['head_idx'] = torch.LongTensor(filtered_data['head_idx'])
+        observation['tail_idx'] = torch.LongTensor(filtered_data['tail_idx'])
+        observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
+
 
         super().observe(observation)
 
         logging.debug("Found {} related concepts and {} relations".format(
-            len(observation['related_concepts']), len(observation['relations']))
+            len(observation['related_concepts']), len(observation['relation_ids']))
         )
         logging.debug("\t{}".format(', '.join(observation['related_concepts'][:10])))
 
@@ -217,7 +231,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         batch = super().batchify(obs_batch, sort=sort)
 
         batch['concept_ids'], _ = padded_tensor(
-            [obs_batch[i]['concept_ids'] for i in batch.valid_indices],
+            [obs_batch[i]['concept_token_ids'] for i in batch.valid_indices],
             pad_idx = self.kg.concept2id[NOCONCEPT_TOKEN]            
         )
         batch['concept_labels'], _ = padded_tensor(
@@ -228,16 +242,16 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             [obs_batch[i]['distances'] for i in batch.valid_indices],
             pad_idx=0
         )
-        batch['relations'], _ = padded_tensor(
-            [obs_batch[i]['relations'] for i in batch.valid_indices], 
+        batch['relation_ids'], _ = padded_tensor(
+            [obs_batch[i]['relation_ids'] for i in batch.valid_indices], 
             pad_idx = self.kg.relation2id[NORELATION_TOKEN]
         )
-        batch['head_ids'], _ = padded_tensor(
-            [obs_batch[i]['head_ids'] for i in batch.valid_indices],
+        batch['head_idx'], _ = padded_tensor(
+            [obs_batch[i]['head_idx'] for i in batch.valid_indices],
             pad_idx=0
         )
-        batch['tail_ids'], _ = padded_tensor(
-            [obs_batch[i]['tail_ids'] for i in batch.valid_indices],
+        batch['tail_idx'], _ = padded_tensor(
+            [obs_batch[i]['tail_idx'] for i in batch.valid_indices],
             pad_idx=0
         )
         batch['triple_labels'], _ = padded_tensor(
@@ -263,9 +277,9 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             batch.text_vec,
             batch.concept_ids,
             batch.distances,
-            batch.relations,
-            batch.head_ids,
-            batch.tail_ids,
+            batch.relation_ids,
+            batch.head_idx,
+            batch.tail_idx,
             batch.triple_labels,
             batch.gate_labels,
             batch.vocab_map,

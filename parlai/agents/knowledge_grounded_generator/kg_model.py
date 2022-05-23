@@ -141,15 +141,15 @@ class KnowledgeGroundedDecoder(nn.Module):
         if incr_state is None:
             (
                 input_ids, 
-                concept_ids, distances, relations, head_ids, tail_ids, triple_labels, gate_labels, 
+                concept_ids, distances, relation_ids, head_idx, tail_idx, triple_labels, gate_labels, 
                 vocab_map, map_mask 
             ) = encoder_state
             gpt_states = None
-            triple_repr = self.triple_encoder(concept_ids, relations, head_ids, tail_ids)
+            triple_repr = self.triple_encoder(concept_ids, relation_ids, head_idx, tail_idx)
         else:
             (
                 input_ids, gpt_states, 
-                distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels, 
+                distances, triple_repr, head_idx, tail_idx, triple_labels, gate_labels, 
                 vocab_map, map_mask, triple_prob, gate
             ) = incr_state
 
@@ -160,8 +160,8 @@ class KnowledgeGroundedDecoder(nn.Module):
             memory_dict={
                 "distances": distances,
                 "triple_repr": triple_repr,
-                "head": head_ids,
-                "tail": tail_ids,
+                "head": head_idx,
+                "tail": tail_idx,
                 "triple_labels": triple_labels,
                 "vocab_map": vocab_map,
                 "map_mask": map_mask
@@ -170,7 +170,7 @@ class KnowledgeGroundedDecoder(nn.Module):
 
         incr_state = (
             input_ids, gpt_states, 
-            distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels,
+            distances, triple_repr, head_idx, tail_idx, triple_labels, gate_labels,
             vocab_map, map_mask, triple_prob, gate
         )
 
