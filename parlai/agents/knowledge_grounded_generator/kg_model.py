@@ -130,6 +130,7 @@ class KnowledgeGroundedDecoder(nn.Module):
 
         # Gate to control generation via language model or knowledge model
         self.gate_linear = nn.Linear(opt['embedding_size'], 1)
+        self.fixed_gate_value = opt['gate']
 
         logging.info("Initialized KnowledgeGroundedDecoder")
 
@@ -218,7 +219,10 @@ class KnowledgeGroundedDecoder(nn.Module):
         concept_probs_vocab.masked_fill_(invalid_mask, 0)
 
         # Determine gate value (which determines whether to take token from language model or select a concept)
-        gate = sigmoid(self.gate_linear(hidden_states))
+        if self.fixed_gate_value != None:
+            gate = self.fixed_gate_value
+        else:
+            gate = sigmoid(self.gate_linear(hidden_states))
 
         probs = gate * concept_probs_vocab + (1 - gate) * lm_probs 
 

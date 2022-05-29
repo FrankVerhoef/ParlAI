@@ -131,6 +131,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             help="Parameter for calculation of probabilities of triple heads"
         )
         group.add_argument(
+            "--gate",
+            type=float,
+            default=None,
+            help="If set, uses a fixed gate probability [0.0 - 1.0]"
+        )
+        group.add_argument(
             "--aggregate-method",
             type=str,
             default="max",
