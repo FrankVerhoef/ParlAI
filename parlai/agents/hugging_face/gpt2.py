@@ -58,7 +58,7 @@ class GPT2Decoder(torch.nn.Module):
 
     def _init_from_pretrained(self, opt):
         # load model
-        if opt["model_name"]:
+        if opt.get("model_name"):
             fle_key = opt["model_name"]
         else:
             model_sz = opt["gpt2_size"]
@@ -241,10 +241,7 @@ class Gpt2Agent(TorchGeneratorAgent):
     ) -> ParlaiParser:
         agent = parser.add_argument_group("Gpt2 Args")
         agent.add_argument(
-            "--model-name",
-            type=str,
-            default=None,
-            help="Any GPT-2 model names.",
+            "--model-name", type=str, default=None, help="Any GPT-2 model names."
         )
         agent.add_argument(
             "--gpt2-size",
@@ -321,7 +318,7 @@ class Gpt2Agent(TorchGeneratorAgent):
     def _encoder_input(self, batch):
         return (batch.text_vec,)
 
-    def _pad_tensor(self, items):
+    def _pad_tensor(self, items, is_label=False):
         """
         Override to always set fp16friendly to False and left_pad to True.
         """

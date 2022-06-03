@@ -231,7 +231,7 @@ class AUCMetrics(Metric):
         assert self._class_name == class_name
         assert len(true_labels) == len(pos_probs)
 
-        TO_INT_FACTOR = 10 ** self._max_bucket_dec_places
+        TO_INT_FACTOR = 10**self._max_bucket_dec_places
         # add the upper and lower bound of the values
         for label, prob in zip(true_labels, pos_probs):
             # calculate the upper and lower bound of the values
@@ -557,9 +557,15 @@ class TorchClassifierAgent(TorchAgent):
             if 'optimizer' in shared:
                 self.optimizer = shared['optimizer']
         elif self._should_initialize_optimizer():
-            optim_params = [p for p in self.model.parameters() if p.requires_grad]
-            self.init_optim(optim_params)
-            self.build_lr_scheduler(states, hard_reset=self.is_finetune)
+            was_reset = self.init_optim(
+                [p for p in self.model.parameters() if p.requires_grad],
+                optim_states=states.get('optimizer'),
+                saved_optim_type=states.get('optimizer_type'),
+                is_finetune=self.is_finetune,
+            )
+            if was_reset:
+                logging.warning("Optimizer was reset. Also resetting LR scheduler.")
+            self.build_lr_scheduler(states, hard_reset=self.is_finetune or was_reset)
 
     def build_criterion(self):
         weight_tensor = torch.FloatTensor(self.class_weights)

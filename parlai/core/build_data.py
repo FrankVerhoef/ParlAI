@@ -175,7 +175,7 @@ def download(url, path, fname, redownload=False, num_retries=5):
     download = not PathManager.exists(outfile) or redownload
     logging.info(f"Downloading {url} to {outfile}")
     retry = num_retries
-    exp_backoff = [2 ** r for r in reversed(range(retry))]
+    exp_backoff = [2**r for r in reversed(range(retry))]
 
     pbar = tqdm.tqdm(unit='B', unit_scale=True, desc='Downloading {}'.format(fname))
 
@@ -407,7 +407,7 @@ def download_from_google_drive(gd_id, destination):
 
     with get_http_session() as session:
         response = session.get(URL, params={'id': gd_id}, stream=True)
-        token = _get_confirm_token(response)
+        token = _get_confirm_token(response) or 't'
 
         if token:
             response.close()
