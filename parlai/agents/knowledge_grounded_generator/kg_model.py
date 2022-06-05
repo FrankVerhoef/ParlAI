@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_scatter import scatter_max, scatter_mean, scatter_add
+#from torch_scatter import scatter_max, scatter_mean, scatter_add
 from parlai.agents.hugging_face.gpt2 import GPT2Decoder
 from parlai.core.torch_generator_agent import TorchGeneratorModel
 import parlai.utils.logging as logging
@@ -82,31 +82,31 @@ class TripleEncoder(nn.Module):
         E = concept_repr.size(2)
 
         concept_hidden, relation_hidden = concept_repr, rel_repr
-        for l in range(layer_number):
+        # for l in range(layer_number):
 
-            # Initialise update_node for GCN calculation
-            update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
-            count = torch.ones_like(head_ids).to(head_ids.device).float()
-            count_out = torch.zeros(B, M).to(head_ids.device).float()
+        #     # Initialise update_node for GCN calculation
+        #     update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
+        #     count = torch.ones_like(head_ids).to(head_ids.device).float()
+        #     count_out = torch.zeros(B, M).to(head_ids.device).float()
 
-            # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
-            o = concept_repr.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
-            scatter_add(o, tail_ids, dim=1, out=update_node)
-            scatter_add(-rel_repr, tail_ids, dim=1, out=update_node)
-            scatter_add(count, tail_ids, dim=1, out=count_out)
+        #     # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
+        #     o = concept_repr.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
+        #     scatter_add(o, tail_ids, dim=1, out=update_node)
+        #     scatter_add(-rel_repr, tail_ids, dim=1, out=update_node)
+        #     scatter_add(count, tail_ids, dim=1, out=count_out)
 
-            # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
-            o = concept_repr.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
-            scatter_add(o, head_ids, dim=1, out=update_node)
-            scatter_add(-rel_repr, head_ids, dim=1, out=update_node)
-            scatter_add(count, head_ids, dim=1, out=count_out)
+        #     # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
+        #     o = concept_repr.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
+        #     scatter_add(o, head_ids, dim=1, out=update_node)
+        #     scatter_add(-rel_repr, head_ids, dim=1, out=update_node)
+        #     scatter_add(count, head_ids, dim=1, out=count_out)
 
-            # Combine calculated update to form new node and relation representations
-            update_node = \
-                self.W_s[l](concept_repr) + \
-                self.W_n[l](update_node) / count_out.clamp(min=1).unsqueeze(2)
-            concept_hidden = self.act(update_node)
-            relation_hidden = self.W_r[l](rel_repr)
+        #     # Combine calculated update to form new node and relation representations
+        #     update_node = \
+        #         self.W_s[l](concept_repr) + \
+        #         self.W_n[l](update_node) / count_out.clamp(min=1).unsqueeze(2)
+        #     concept_hidden = self.act(update_node)
+        #     relation_hidden = self.W_r[l](rel_repr)
 
         return concept_hidden, relation_hidden
 
@@ -259,10 +259,10 @@ class KnowledgeGroundedDecoder(nn.Module):
             # max: score(tail) = max_{head \in N(tail)} gamma * score(head) + p(head -> tail)
             update_value = triple_head_score * self.gamma + triple_prob
             out = torch.zeros_like(node_score).to(node_score.device).float()
-            if self.aggregate_method == "max":
-                scatter_max(update_value, tail, dim=-1, out=out)
-            elif self.aggregate_method == "avg":
-                scatter_mean(update_value, tail, dim=-1, out=out)           
+            # if self.aggregate_method == "max":
+            #     scatter_max(update_value, tail, dim=-1, out=out)
+            # elif self.aggregate_method == "avg":
+            #     scatter_mean(update_value, tail, dim=-1, out=out)           
             concept_scores.append(out)
         
         # Assign large negative value to start-nodes
