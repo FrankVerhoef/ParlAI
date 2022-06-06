@@ -59,28 +59,34 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         # Add custom arguments only for this model.
         group = parser.add_argument_group('KG Generator Agent')
         group.add_argument(
+            '--kg-datadir', 
+            type=str, 
+            default='/users/FrankVerhoef/Programming/Project_AI/ParlAI/data/kg_data/', 
+            help='dir for knowledge graph data'
+        )
+        group.add_argument(
             '--concepts', 
             type=str, 
-            default='/users/FrankVerhoef/Programming/Project_AI/multigen/data/concept.txt', 
-            help='path to concept vocab'
+            default='concept.txt', 
+            help='file with concept vocab'
         )
         group.add_argument(
             '--relations', 
             type=str, 
-            default='/users/FrankVerhoef/Programming/Project_AI/multigen/data/relation.txt', 
-            help='path to relation names'
+            default='relation.txt', 
+            help='file with relation names'
         )
         group.add_argument(
             '--dataset-concepts', 
             type=str, 
-            default='/users/FrankVerhoef/Programming/Project_AI/multigen/data/anlg/total_concepts.txt', 
-            help='path to dataset vocab'
+            default='total_concepts.txt', 
+            help='file with dataset concepts'
         )
         group.add_argument(
             '--kg', 
             type=str, 
-            default='/users/FrankVerhoef/Programming/Project_AI/multigen/data/cpnet_25.graph', 
-            help='path to knowledge graph'
+            default='cpnet_25.graph', 
+            help='file with knowledge graph'
         )
         group.add_argument(
             '-hid', '--hidden-size', type=int, default=256, help='Hidden size.'
@@ -146,14 +152,14 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return parser
 
 
-    def __init__(self, opt):
-        super().__init__(opt)
+    def __init__(self, opt, shared=None):
+        super().__init__(opt, shared)
 
         self.model_vocab = self.dict.keys()
         self.num_hops = opt['num_hops']
         self.max_concepts = opt['max_concepts']
         self.max_triples = opt['max_triples']
-        self.kg = ConceptGraph(opt['concepts'], opt['relations'], opt['dataset_concepts'], opt['kg'])
+        self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['dataset_concepts'], opt['kg'])
         self.vocab_map, self.map_mask = self.build_vocab_map()
         logging.info("Initialized KnowledgeGroundedGeneratorAgent")
 
@@ -182,6 +188,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
     def observe(self, observation):
         logging.debug('=== Observation ===\n{}'.format(observation['text']))
+        observation = super().observe(observation)
+
         # Match with concepts in knowledge graph
         labels = observation['labels'] if 'labels' in observation.keys() else observation['eval_labels']
         concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(labels))
@@ -214,9 +222,6 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation['head_idx'] = torch.LongTensor(filtered_data['head_idx'])
         observation['tail_idx'] = torch.LongTensor(filtered_data['tail_idx'])
         observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
-
-
-        super().observe(observation)
 
         logging.debug("Found {} related concepts and {} relations".format(
             len(observation['related_concepts']), len(observation['relation_ids']))
