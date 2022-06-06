@@ -284,6 +284,8 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
         self.encoder = Identity()
         self.decoder = KnowledgeGroundedDecoder(opt, dict)
 
+        logging.info("Initialized KnowledgeGroundedModel")
+
     def _get_special_tokens(self, opt, dict):
         return dict.null_idx, dict.start_idx, dict.end_idx
 

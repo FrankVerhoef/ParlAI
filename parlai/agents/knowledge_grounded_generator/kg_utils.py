@@ -122,11 +122,11 @@ NORELATION_TOKEN = '<NoRelation>'
 
 class ConceptGraph(nx.Graph):
 
-    def __init__(self, concepts, relations, total_concepts, graph):
+    def __init__(self, path, concepts, relations, total_concepts, graph):
         super().__init__()
-        self.load_resources(concepts, relations)
-        self.load_total_concepts(total_concepts)
-        self.load_knowledge_graph(graph)
+        self.load_resources(path + concepts, path + relations)
+        self.load_total_concepts(path + total_concepts)
+        self.load_knowledge_graph(path + graph)
 
 
     def load_resources(self, concepts, relations):
