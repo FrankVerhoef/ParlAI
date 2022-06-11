@@ -1,5 +1,6 @@
 import networkx as nx
 import json
+import pickle
 import spacy
 import csv
 import parlai.utils.logging as logging
@@ -122,17 +123,16 @@ NORELATION_TOKEN = '<NoRelation>'
 
 class ConceptGraph(nx.Graph):
 
-    def __init__(self, path, concepts, relations, total_concepts, graph):
+    def __init__(self, path, concepts, relations, graph):
         super().__init__()
         self.load_resources(path + concepts, path + relations)
-        self.load_total_concepts(path + total_concepts)
         self.load_knowledge_graph(path + graph)
 
 
     def load_resources(self, concepts, relations):
 
-        concept2id = {NOCONCEPT_TOKEN: 0}
-        id2concept = {0: NOCONCEPT_TOKEN}
+        concept2id = {}
+        id2concept = {}
         cpnet_vocab = []
         with open(concepts, "r", encoding="utf8") as f:
             for line in f.readlines():
@@ -140,34 +140,30 @@ class ConceptGraph(nx.Graph):
                 concept2id[w] = len(concept2id)
                 id2concept[len(id2concept)] = w
                 cpnet_vocab.append(w)
+        concept2id[NOCONCEPT_TOKEN] = len(concept2id)
+        id2concept[len(id2concept)] = NOCONCEPT_TOKEN
         self.concept2id = concept2id
         self.id2concept = id2concept
         self.vocab = set([c.replace("_", " ") for c in cpnet_vocab])
         logging.debug("Loaded {} concepts".format(len(self.concept2id)))
 
-        id2relation = {0: NORELATION_TOKEN}
-        relation2id = {NORELATION_TOKEN: 0}
+        id2relation = {}
+        relation2id = {}
         with open(relations, "r", encoding="utf8") as f:
             for w in f.readlines():
                 id2relation[len(id2relation)] = w.strip()
                 relation2id[w.strip()] = len(relation2id)
         l = len(relation2id)
-        for i in range(1, len(relation2id)):        # Skip <NoRelation>
+        for i in range(len(relation2id)): 
             reverse = 'reverse_' + id2relation[i]
             id2relation[len(id2relation)] = reverse
             relation2id[reverse] = len(relation2id)
+        id2relation[len(id2relation)] = NORELATION_TOKEN
+        relation2id[NORELATION_TOKEN] = len(relation2id)
 
         self.id2relation = id2relation
         self.relation2id = relation2id
         logging.debug("Loaded {} relation types".format(len(relation2id)))
-
-
-    def load_total_concepts(self, concepts_path):
-
-        with open(concepts_path, 'r') as f:
-            total_concepts = [line[:-1] for line in f]
-        self.dataset_concept2id = [self.concept2id[c] for c in total_concepts]
-        logging.debug("Loaded {} data concepts".format(len(self.dataset_concept2id)))
 
 
     def load_knowledge_graph(self, graph_path):
@@ -176,8 +172,8 @@ class ConceptGraph(nx.Graph):
             In this graph multiple edges between the same nodes are combined (and weight added)
         """
         
-        cpnet = nx.read_gpickle(graph_path)
-        logging.debug("Loaded {} nodes and {} edges for knowledge graph".format(len(cpnet.nodes), len(cpnet.edges)))
+        cpnet = pickle.load(open(graph_path, "rb"))
+        logging.info("Loaded knowledge graph with {} nodes and {} edges".format(len(cpnet.nodes), len(cpnet.edges)))
 
         cpnet_simple = nx.Graph()
         for u, v, data in cpnet.edges(data=True):
@@ -243,7 +239,7 @@ class ConceptGraph(nx.Graph):
             return []
 
 
-    def find_neighbours(self, source_concepts, target_concepts, num_hops, max_B=100):
+    def find_neighbours(self, source_concepts, target_concepts, dataset_concepts, num_hops, max_B=100):
         """
             Find ...
         """
@@ -252,16 +248,18 @@ class ConceptGraph(nx.Graph):
         start = source                              # start init contains id's of source concepts
         Vts = dict([(x,0) for x in start])          # Vts init contains id's of concepts in knowledge graph, with distance 0
         Ets = {}
-        dataset_concept2id_set = set(self.dataset_concept2id)
+        #dataset_concept2id_set = set(dataset_concept2id)
         for t in range(num_hops):      # T is number of hops
             V = {}
             templates = []
             for s in start:
                 if s in self.simple_graph:
+                    logging.debug("Check neighbors of: {}".format(self.id2concept[s]))
                     for n in self.simple_graph[s]:       # loops through the neighbors
-                        if n not in Vts and n in dataset_concept2id_set:
+                        if n not in Vts and self.id2concept[n] in dataset_concepts:
                             if n not in Vts:
                                 if n not in V:      # if not yet reached, add to 'V' with frequency
+                                    logging.debug("New node: {}".format(self.id2concept[n]))
                                     V[n] = 1
                                 else:
                                     V[n] += 1       # if already reached, increase frequency
@@ -273,17 +271,21 @@ class ConceptGraph(nx.Graph):
                             else:
                                 rels = self.get_edge(s, n)
                                 if len(rels) > 0:
-                                    Ets[n].update({s: rels})  
+                                    Ets[n].update({s: rels})
+                        # else:
+                            # logging.debug("Not added: {}".format(self.id2concept[n]))
+                # else:
+                    # logging.debug("Not in simple graph: {}".format(self.id2concept[s]))
                             
             V = list(V.items())         # convert from dict to list
             count_V = sorted(V, key=lambda x: x[1], reverse=True)[:max_B] # select most frequently visited
-            start = [x[0] for x in count_V if x[0] in dataset_concept2id_set] # update start to the newly visited nodes
+            start = [x[0] for x in count_V if self.id2concept[x[0]] in dataset_concepts] # update start to the newly visited nodes
             
             # Add nodes to Vts, with distance increased by 1
             Vts.update(dict([(x, t+1) for x in start]))
 
-            logging.debug("\tResult after hop {}: \t{} new nodes \t{} total nodes \t {} total edges".format(
-                t, len(V), len(count_V), len(Ets)
+            logging.debug("\tResult after hop {}: \t{} new nodes (max 10): {}".format(
+                t, len(V), V[:10]
             ))
         
         # Unclear what the purpose is of these lines. Doesn't seem to change concepts & distances

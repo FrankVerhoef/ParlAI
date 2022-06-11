@@ -213,14 +213,14 @@ class KnowledgeGroundedDecoder(nn.Module):
         concept_probs = softmax(concept_scores)
 
         # Calculate probability for concepts
-        index = memory_dict["vocab_map"].unsqueeze(0).unsqueeze(0).expand(concept_probs.size(0), concept_probs.size(1), -1)
+        index = memory_dict["vocab_map"].unsqueeze(1).expand(concept_probs.size(0), concept_probs.size(1), -1)
         concept_probs_vocab = concept_probs.gather(2, index)
-        invalid_mask = (memory_dict["map_mask"] == 0).unsqueeze(0).unsqueeze(0)
+        invalid_mask = (memory_dict["map_mask"] == 0).unsqueeze(1)
         concept_probs_vocab.masked_fill_(invalid_mask, 0)
 
         # Determine gate value (which determines whether to take token from language model or select a concept)
         if self.fixed_gate_value != None:
-            gate = self.fixed_gate_value
+            gate = torch.ones((lm_probs.size(0), lm_probs.size(1) ,1)) * self.fixed_gate_value
         else:
             gate = sigmoid(self.gate_linear(hidden_states))
 

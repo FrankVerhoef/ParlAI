@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from parlai.utils.torch import padded_tensor
 from parlai.core.metrics import AverageMetric
 
-from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph
+from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, blacklist
 from parlai.agents.knowledge_grounded_generator.kg_model import KnowledgeGroundedModel
 import parlai.utils.logging as logging
 
@@ -159,8 +159,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         self.num_hops = opt['num_hops']
         self.max_concepts = opt['max_concepts']
         self.max_triples = opt['max_triples']
-        self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['dataset_concepts'], opt['kg'])
-        self.vocab_map, self.map_mask = self.build_vocab_map()
+        self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['kg'])
+        self.matched_concepts = self.match_dataset_concepts(opt['kg_datadir'] + opt['dataset_concepts'])
         logging.info("Initialized KnowledgeGroundedGeneratorAgent")
 
 
@@ -170,12 +170,21 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return model
 
 
-    def build_vocab_map(self):
+    def match_dataset_concepts(self, concepts_path):
+
+        with open(concepts_path, 'r') as f:
+            total_concepts = set([line[:-1] for line in f])
+        matched_ids = (total_concepts - blacklist).intersection(self.kg.concept2id.keys())
+        logging.debug("Matched {} of {} dataset tokens with concepts in knowledgegraph".format(len(matched_ids), len(total_concepts)))
+        return matched_ids
+
+
+    def build_vocab_map(self, concept_token_ids):
 
         vocab_map, map_mask = [], []
-        for idx in self.model_vocab:
+        for token_id in sorted(self.dict.ind2tok.keys()):
             try: 
-                pos = self.kg.concept2id.index(idx)
+                pos = concept_token_ids.index(token_id)
                 vocab_map.append(pos)
                 map_mask.append(1)
             except:
@@ -195,7 +204,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(labels))
         # for k, v in concepts.items():
         #     print(k, v)
-        related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)[0]
+        related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], self.matched_concepts, num_hops=self.num_hops, max_B=100)[0]
         # print("Related concepts: ")
         # for k, v in related_concepts.items():
         #     print(k, v[:10])
@@ -211,11 +220,17 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         # TODO: Truncate or pad to max number of concepts and relations
 
         # Info about the related concepts
+        concept_token_ids = [self.dict.txt2vec(' ' + c)[0] for c in filtered_data['concepts']]
         observation['related_concepts'] = filtered_data['concepts']
-        observation['concept_token_ids'] = torch.LongTensor([self.dict.txt2vec(' ' + c)[0] for c in filtered_data['concepts']])
+        observation['concept_token_ids'] = torch.LongTensor(concept_token_ids)
         observation['concept_labels'] = torch.LongTensor(filtered_data['labels'])
         observation['distances'] = torch.LongTensor(filtered_data['distances'])
         observation['gate_labels'] = torch.LongTensor(gate_labels)
+
+        # Info how to map concepts to vocab
+        vocab_map, map_mask = self.build_vocab_map(concept_token_ids)
+        observation['vocab_map'] = torch.LongTensor(vocab_map)
+        observation['map_mask'] = torch.LongTensor(map_mask)
 
         # Info about relations to related concepts
         observation['relation_ids'] = torch.LongTensor(filtered_data['relation_ids'])
@@ -243,11 +258,11 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
         batch['concept_ids'], _ = padded_tensor(
             [obs_batch[i]['concept_token_ids'] for i in batch.valid_indices],
-            pad_idx = self.kg.concept2id[NOCONCEPT_TOKEN]            
+            pad_idx=self.NULL_IDX          
         )
         batch['concept_labels'], _ = padded_tensor(
             [obs_batch[i]['concept_labels'] for i in batch.valid_indices],
-            pad_idx = self.kg.concept2id[NOCONCEPT_TOKEN]            
+            pad_idx=-1           
         )
         batch['distances'], _ = padded_tensor(
             [obs_batch[i]['distances'] for i in batch.valid_indices],
@@ -255,7 +270,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         )
         batch['relation_ids'], _ = padded_tensor(
             [obs_batch[i]['relation_ids'] for i in batch.valid_indices], 
-            pad_idx = self.kg.relation2id[NORELATION_TOKEN]
+            pad_idx=self.kg.relation2id[NORELATION_TOKEN]
         )
         batch['head_idx'], _ = padded_tensor(
             [obs_batch[i]['head_idx'] for i in batch.valid_indices],
@@ -273,8 +288,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             [obs_batch[i]['gate_labels'] for i in batch.valid_indices],
             pad_idx=-1
         )
-        batch['vocab_map'] = torch.LongTensor(self.vocab_map)
-        batch['map_mask'] = torch.LongTensor(self.map_mask)
+        batch['vocab_map'] = torch.stack(
+            [obs_batch[i]['vocab_map'] for i in batch.valid_indices]
+        )
+        batch['map_mask'] = torch.stack(
+            [obs_batch[i]['map_mask'] for i in batch.valid_indices]
+        )
 
         return batch
 
