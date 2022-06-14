@@ -18,13 +18,13 @@ class KG_loss(nn.Module):
         self.invalid = invalid
         self.alpha = alpha
         self.beta = beta
+        self.gen_loss_fn = nn.NLLLoss(ignore_index=self.ignore_index)
 
     def forward(self, lm_probs, labels, triple_prob, triple_labels, gate, gate_labels):
 
         # Compute overall loss
-        gen_loss_fn = nn.NLLLoss(ignore_index=self.ignore_index)
         probs_clamp = lm_probs.clamp(min=1e-5)
-        gen_loss = gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1))
+        gen_loss = self.gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1))
 
         # Compute and record triple loss
         triple_mask = (triple_labels != self.invalid).unsqueeze(1).expand_as(triple_prob).float()
@@ -93,12 +93,6 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         )
         group.add_argument(
             '-emb', '--embedding-size', type=int, default=768, help='Hidden size.'
-        )
-        group.add_argument(
-            "--source-length",
-            type=int,
-            default=16,
-            help="Length of input sentence."
         )
         group.add_argument(
             "--num-hops",
@@ -325,6 +319,19 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         )
 
 
+
+    def get_prefix_tokens(self, batch):
+        """
+        Set prefix tokens to seed decoding at generation time.
+
+        By default, torch_generator_agent does not utilize prefix tokens, but this is
+        left overridable by child classes.
+
+        Returned tensor should be of dimension bsz x len(prefix)
+        """
+        return None # batch.text_vec
+
+
     def compute_loss(self, batch, return_output=False):
         """
         Compute and return the loss for the given batch.
@@ -356,6 +363,26 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             return (loss, model_output)
         else:
             return loss
+
+
+    def _construct_label_token_losses(self, labels, model_output):
+        # Get non-aggregated losses
+        scores, preds, encoder_states, triple_prob, gate = model_output
+        score_view = scores.reshape(-1, scores.size(-1))
+        losses = self.criterion.gen_loss_fn(score_view, labels.view(-1)).view(len(labels), -1)
+
+        # Zip decoded tokens with losses
+        token_losses = []
+        for i, label in enumerate(labels):
+            token_losses.append(
+                list(
+                    zip(
+                        [self.dict[token] for token in label.tolist()],
+                        losses[i].tolist(),
+                    )
+                )
+            )
+        return token_losses
 
 
     def build_criterion(self):
