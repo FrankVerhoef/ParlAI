@@ -220,7 +220,7 @@ class KnowledgeGroundedDecoder(nn.Module):
 
         # Determine gate value (which determines whether to take token from language model or select a concept)
         if self.fixed_gate_value != None:
-            gate = torch.ones((lm_probs.size(0), lm_probs.size(1) ,1)) * self.fixed_gate_value
+            gate = torch.ones((lm_probs.size(0), lm_probs.size(1) ,1), device=lm_probs.device) * self.fixed_gate_value
         else:
             gate = sigmoid(self.gate_linear(hidden_states))
 
