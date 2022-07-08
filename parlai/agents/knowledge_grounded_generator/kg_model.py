@@ -90,23 +90,23 @@ class TripleEncoder(nn.Module):
             count_out = torch.zeros(B, M).to(head_ids.device).float()
 
             # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
-            o = concept_repr.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
+            o = concept_hidden.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
             scatter_add(o, tail_ids, dim=1, out=update_node)
-            scatter_add(-rel_repr, tail_ids, dim=1, out=update_node)
+            scatter_add(-relation_hidden, tail_ids, dim=1, out=update_node)
             scatter_add(count, tail_ids, dim=1, out=count_out)
 
             # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
-            o = concept_repr.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
+            o = concept_hidden.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
             scatter_add(o, head_ids, dim=1, out=update_node)
-            scatter_add(-rel_repr, head_ids, dim=1, out=update_node)
+            scatter_add(-relation_hidden, head_ids, dim=1, out=update_node)
             scatter_add(count, head_ids, dim=1, out=count_out)
 
             # Combine calculated update to form new node and relation representations
             update_node = \
-                self.W_s[l](concept_repr) + \
+                self.W_s[l](concept_hidden) + \
                 self.W_n[l](update_node) / count_out.clamp(min=1).unsqueeze(2)
             concept_hidden = self.act(update_node)
-            relation_hidden = self.W_r[l](rel_repr)
+            relation_hidden = self.W_r[l](relation_hidden)
 
         return concept_hidden, relation_hidden
 
