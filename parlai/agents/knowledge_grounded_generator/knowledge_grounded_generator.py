@@ -282,7 +282,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         )
         batch['gate_labels'], _ = padded_tensor(
             [obs_batch[i]['gate_labels'] for i in batch.valid_indices],
-            pad_idx=-1
+            pad_idx=-1,
+            left_padded=True
         )
         batch['vocab_map'] = torch.stack(
             [obs_batch[i]['vocab_map'] for i in batch.valid_indices]
