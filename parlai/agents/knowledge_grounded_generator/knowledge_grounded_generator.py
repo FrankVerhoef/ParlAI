@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from parlai.utils.torch import padded_tensor
 from parlai.core.metrics import AverageMetric
+from parlai.core.torch_generator_agent import PPLMetric
 
 from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, blacklist
 from parlai.agents.knowledge_grounded_generator.kg_model import KnowledgeGroundedModel
@@ -18,27 +19,28 @@ class KG_loss(nn.Module):
         self.invalid = invalid
         self.alpha = alpha
         self.beta = beta
-        self.gen_loss_fn = nn.NLLLoss(ignore_index=self.ignore_index)
 
     def forward(self, lm_probs, labels, triple_prob, triple_labels, gate, gate_labels):
+        B = lm_probs.size(0)
 
         # Compute overall loss
         probs_clamp = lm_probs.clamp(min=1e-5)
-        gen_loss = self.gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1))
+        gen_loss_fn = nn.NLLLoss(ignore_index=self.ignore_index, reduction='none')
+        gen_loss = gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1)).view(B, -1).mean(dim=1)
 
         # Compute and record triple loss
         triple_mask = (triple_labels != self.invalid).unsqueeze(1).expand_as(triple_prob).float()
         triple_labels = triple_labels.unsqueeze(1).expand_as(triple_prob) * triple_mask
-        triple_loss_fn = nn.BCELoss(weight=triple_mask.view(-1), reduction='mean')
-        triple_loss = triple_loss_fn(triple_prob.view(-1), triple_labels.view(-1).float())
+        triple_loss_fn = nn.BCELoss(weight=triple_mask, reduction='none')
+        triple_loss = triple_loss_fn(triple_prob, triple_labels.float()).view(B, -1).mean(dim=1)
 
         # Compute and record gate loss   
         gate_mask = (gate_labels != self.invalid).float()
         gate_labels.masked_fill_((gate_labels == self.invalid), 0)
         lm_mask = (gate_labels.sum(1) != 0).float().unsqueeze(1)
         gate_mask = lm_mask.expand_as(gate_labels) * gate_mask
-        gate_loss_fn = nn.BCELoss(weight=gate_mask.view(-1), reduction='mean')
-        gate_loss = gate_loss_fn(gate.view(-1), gate_labels.view(-1).float())
+        gate_loss_fn = nn.BCELoss(weight=gate_mask, reduction='none')
+        gate_loss = gate_loss_fn(gate.view(B, -1), gate_labels.float()).view(B, -1).mean(dim=1)
 
         combined_loss = gen_loss + self.alpha * gate_loss + self.beta * triple_loss
 
@@ -103,13 +105,13 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         group.add_argument(
             "--max-concepts",
             type=int,
-            default=400,
+            default=256,
             help="Maximum number of related concepts to include."
         )
         group.add_argument(
             "--max-triples",
             type=int,
-            default=800,
+            default=768,
             help="Maximum number of relations to include."
         )
         group.add_argument(
@@ -300,6 +302,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return (
             batch.text_vec,
             batch.concept_ids,
+            batch.concept_labels,
             batch.distances,
             batch.relation_ids,
             batch.head_idx,
@@ -350,14 +353,16 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             gate, batch.gate_labels
         )
 
-        self.record_local_metric('loss', AverageMetric.many([combined_loss.item()]))
-        self.record_local_metric('loss_gen', AverageMetric.many([gen_loss.item()]))
-        self.record_local_metric('loss_triple', AverageMetric.many([triple_loss.item()]))
-        self.record_local_metric('loss_gate', AverageMetric.many([gate_loss.item()]))
+        num_target_tokens = batch.label_vec.ne(self.NULL_IDX).long().sum(dim=-1)
 
-         # actually do backwards loss
+        self.record_local_metric('loss', AverageMetric.many(combined_loss))
+        self.record_local_metric('loss_gen', AverageMetric.many(gen_loss))
+        self.record_local_metric('loss_triple', AverageMetric.many(triple_loss))
+        self.record_local_metric('loss_gate', AverageMetric.many(gate_loss))
+
+        #self.record_local_metric('ppl', PPLMetric.many(gen_loss, num_target_tokens))
+
         loss = combined_loss.sum()
-        # loss /= target_tokens.sum()  # average loss per token
 
         if return_output:
             return (loss, model_output)

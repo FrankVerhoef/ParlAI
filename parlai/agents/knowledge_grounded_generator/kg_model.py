@@ -142,7 +142,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         if incr_state is None:
             (
                 input_ids, 
-                concept_ids, distances, relation_ids, head_idx, tail_idx, triple_labels, gate_labels, 
+                concept_ids, concept_labels, distances, relation_ids, head_idx, tail_idx, triple_labels, gate_labels, 
                 vocab_map, map_mask 
             ) = encoder_state
             gpt_states = None
@@ -150,7 +150,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         else:
             (
                 input_ids, gpt_states, 
-                distances, triple_repr, head_idx, tail_idx, triple_labels, gate_labels, 
+                concept_labels, distances, triple_repr, head_idx, tail_idx, triple_labels, gate_labels, 
                 vocab_map, map_mask, triple_prob, gate
             ) = incr_state
 
@@ -159,6 +159,7 @@ class KnowledgeGroundedDecoder(nn.Module):
             input_ids,
             gpt_states,
             memory_dict={
+                "concept_labels": concept_labels,
                 "distances": distances,
                 "triple_repr": triple_repr,
                 "head": head_idx,
@@ -171,7 +172,7 @@ class KnowledgeGroundedDecoder(nn.Module):
 
         incr_state = (
             input_ids, gpt_states, 
-            distances, triple_repr, head_idx, tail_idx, triple_labels, gate_labels,
+            concept_labels, distances, triple_repr, head_idx, tail_idx, triple_labels, gate_labels,
             vocab_map, map_mask, triple_prob, gate
         )
 
@@ -208,7 +209,9 @@ class KnowledgeGroundedDecoder(nn.Module):
             triple_prob, 
             memory_dict["distances"],
             memory_dict["head"], 
-            memory_dict["tail"]
+            memory_dict["tail"],
+            memory_dict["concept_labels"],
+            memory_dict["triple_labels"]
         )
         concept_probs = softmax(concept_scores)
 
@@ -229,7 +232,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         return (probs, gate, triple_prob), gpt_states
 
 
-    def multi_hop(self, triple_prob, distance, head, tail):
+    def multi_hop(self, triple_prob, distance, head, tail, concept_label, triple_label):
         '''
         triple_prob: B x L x Mt
         distance: B x M
@@ -243,6 +246,8 @@ class KnowledgeGroundedDecoder(nn.Module):
         concept_size = (triple_prob.size(0), triple_prob.size(1), distance.size(1))
         init_mask = torch.zeros_like(distance).unsqueeze(1).expand(*concept_size).to(distance.device).float()
         init_mask.masked_fill_((distance == 0).unsqueeze(1), 1)
+        final_mask = init_mask.clone()
+        init_mask.masked_fill_((concept_label == -1).unsqueeze(1), 0)
         concept_scores.append(init_mask)
 
         head = head.unsqueeze(1).expand(triple_prob.size(0), triple_prob.size(1), -1)
@@ -253,6 +258,7 @@ class KnowledgeGroundedDecoder(nn.Module):
             # Calculate triple head score
             node_score = concept_scores[-1]
             triple_head_score = node_score.gather(2, head)
+            triple_head_score.masked_fill_((triple_label == -1).unsqueeze(1), 0)
             
             # Aggregate scores to tail nodes
             # avg: score(tail) = avg_{head \in N(tail)} gamma * score(head) + p(head -> tail) 
@@ -262,14 +268,15 @@ class KnowledgeGroundedDecoder(nn.Module):
             if self.aggregate_method == "max":
                 scatter_max(update_value, tail, dim=-1, out=out)
             elif self.aggregate_method == "avg":
-                scatter_mean(update_value, tail, dim=-1, out=out)           
+                scatter_mean(update_value, tail, dim=-1, out=out)
+            out.masked_fill_((concept_label == -1).unsqueeze(1), 0)           
             concept_scores.append(out)
         
         # Assign large negative value to start-nodes
         # Apply decay factor for concept scores that are further away from source
-        total_concept_score = init_mask * -1e5 # torch.zeros_like(node_score)
+        total_concept_score = final_mask * -1e5 # torch.zeros_like(node_score)
         for score in concept_scores[1:]:
-            total_concept_score += score * 0.8 ** distance
+            total_concept_score += score # * 0.8 ** distance
         # B x L x M
 
         return total_concept_score
@@ -344,7 +351,7 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
         latent, final_state = self.decoder(inputs, encoder_states)
         (
             input_ids, gpt_states, 
-            distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels, 
+            concept_labels, distances, triple_repr, head_ids, tail_ids, triple_labels, gate_labels, 
             vocab_map, map_mask, triple_prob, gate
         ) = final_state
         logits = self.output(latent)
