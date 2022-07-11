@@ -19,14 +19,14 @@ class KG_loss(nn.Module):
         self.invalid = invalid
         self.alpha = alpha
         self.beta = beta
+        self.gen_loss_fn = nn.NLLLoss(ignore_index=self.ignore_index, reduction='none')
 
     def forward(self, lm_probs, labels, triple_prob, triple_labels, gate, gate_labels):
         B = lm_probs.size(0)
 
         # Compute overall loss
         probs_clamp = lm_probs.clamp(min=1e-5)
-        gen_loss_fn = nn.NLLLoss(ignore_index=self.ignore_index, reduction='none')
-        gen_loss = gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1)).view(B, -1).mean(dim=1)
+        gen_loss = self.gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1)).view(B, -1).mean(dim=1)
 
         # Compute and record triple loss
         triple_mask = (triple_labels != self.invalid).unsqueeze(1).expand_as(triple_prob).float()
@@ -374,8 +374,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
     def _construct_label_token_losses(self, labels, model_output):
         # Get non-aggregated losses
         scores, preds, encoder_states, triple_prob, gate = model_output
-        score_view = scores.reshape(-1, scores.size(-1))
-        losses = self.criterion.gen_loss_fn(score_view, labels.view(-1)).view(len(labels), -1)
+        score_view = scores.clamp(min=1e-5).reshape(-1, scores.size(-1))
+        losses = self.criterion.gen_loss_fn(score_view.log(), labels.view(-1)).view(len(labels), -1)
 
         # Zip decoded tokens with losses
         token_losses = []
