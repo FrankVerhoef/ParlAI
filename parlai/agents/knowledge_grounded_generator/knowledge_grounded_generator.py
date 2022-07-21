@@ -10,6 +10,8 @@ from parlai.core.torch_generator_agent import PPLMetric
 from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, blacklist
 from parlai.agents.knowledge_grounded_generator.kg_model import KnowledgeGroundedModel
 import parlai.utils.logging as logging
+import time as timer
+from parlai.utils.strings import colorize
 
 class KG_loss(nn.Module):
 
@@ -192,19 +194,17 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
 
     def observe(self, observation):
-        logging.debug('=== Observation ===\n{}'.format(observation['text']))
+        logging.debug('=== Observation ===')
+        logging.debug('Text:{}'.format(observation['text']))
+        start = timer.time()
         observation = super().observe(observation)
 
         # Match with concepts in knowledge graph
         labels = observation['labels'] if 'labels' in observation.keys() else observation['eval_labels']
+        logging.debug("Labels: {}".format(labels))
         concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(labels))
-        # for k, v in concepts.items():
-        #     print(k, v)
+        logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
         related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], self.matched_concepts, num_hops=self.num_hops, max_B=100)[0]
-        # print("Related concepts: ")
-        # for k, v in related_concepts.items():
-        #     print(k, v[:10])
-        
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
 
         # Construct list with gate_labels
@@ -234,17 +234,32 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation['tail_idx'] = torch.LongTensor(filtered_data['tail_idx'])
         observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
 
-        logging.debug("Found {} related concepts and {} relations".format(
-            len(observation['related_concepts']), len(observation['relation_ids']))
-        )
-        logging.debug("\t{}".format(', '.join(observation['related_concepts'][:10])))
+        logging.debug("Related concepts {}: {}".format(
+            len(observation['related_concepts']), 
+            self.kg.formatted_concepts_string(filtered_data, 10)
+        ))
+        # logging.debug("Translated concepts: {}".format([
+        #     (c, self.dict.vec2txt([self.dict.txt2vec(' ' + c)[0]]))
+        #     for c in filtered_data['concepts']
+        # ]))
+        logging.debug("Relations {}: {}".format(
+            len(observation['head_idx']),
+            self.kg.formatted_triples_string(filtered_data, 5)
+        ))
+        logging.debug("Observation time: {}".format(timer.time() - start))
+
+        ## log statistics
+        # Number of concepts in the input
+        self.global_metrics.add('src_cpt', AverageMetric(len(concepts['qc']), 1))
+        # Fraction of target tokens that is a concept
+        self.global_metrics.add('gate_label', AverageMetric(sum(gate_labels)/len(label_ids), 1))
 
         return observation
 
 
     def act(self):
 
-        logging.debug("=== Action === ")
+        # logging.debug("=== Action === ")
         reply = super().act()
 
         return reply
@@ -323,7 +338,6 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         )
 
 
-
     def get_prefix_tokens(self, batch):
         """
         Set prefix tokens to seed decoding at generation time.
@@ -335,6 +349,26 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         """
         return None # batch.text_vec
 
+    def formatted_response(self, tokens, inserted_concepts, labels):
+
+        s = ""
+        for token, is_concept, label in zip(tokens, inserted_concepts, labels):
+            if label != self.NULL_IDX:
+                if is_concept:
+                    s += colorize(self.dict.vec2txt([token]), 'highlight')
+                else:
+                    s += colorize(self.dict.vec2txt([token]), 'blue')
+        return s
+
+    def teacher_forcing(self, text, preds, changed, labels):
+        s = colorize(self.dict.vec2txt(text), 'text')
+        s += colorize(self.dict.vec2txt(labels[:-1]), 'labels')
+        if changed[-1]:
+            s += colorize(self.dict.vec2txt([preds[-1]]), 'highlight')
+        else:
+            s += colorize(self.dict.vec2txt([preds[-1]]), 'highlight2')
+        return s        
+
 
     def compute_loss(self, batch, return_output=False):
         """
@@ -345,8 +379,25 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         if batch.label_vec is None:
             raise ValueError('Cannot compute loss without a label.')
 
+        # logging.debug("=== Compute Loss === ")
+        # logging.debug("\tinput: {}\n\tlabel: {}".format(batch.text_vec, batch.label_vec))
+        logging.debug("Size input {}, label {}".format(batch.text_vec.shape, batch.label_vec.shape))
         model_output = self.model(*self._model_input(batch), ys=batch.label_vec)
-        scores, preds, encoder_states, triple_prob, gate = model_output
+        scores, preds, encoder_states, triple_prob, gate, index_diff = model_output
+        # logging.debug("\tpreds: {}".format(preds))
+        # for i, (p, c, l) in enumerate(zip(preds, index_diff, batch.label_vec)):
+        #     logging.debug("Example {}: {} concepts inserted: {}".format(
+        #         i,
+        #         int(sum(c)),
+        #         self.formatted_response(p, c, l)
+        #     ))
+        # for i, (t, p, c, l) in enumerate(zip(batch.text_vec, preds, index_diff, batch.label_vec)):
+        #     for num in range(1, len(l)+1):
+        #         logging.debug("Generate {}/{}: {}".format(
+        #             i,
+        #             num,
+        #             self.teacher_forcing(t, p[:num], c[:num], l[:num])
+        #         ))
 
         combined_loss, gen_loss, triple_loss, gate_loss = self.criterion(
             scores, batch.label_vec, 
@@ -360,8 +411,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         self.record_local_metric('loss_gen', AverageMetric.many(gen_loss))
         self.record_local_metric('loss_triple', AverageMetric.many(triple_loss))
         self.record_local_metric('loss_gate', AverageMetric.many(gate_loss))
-
-        #self.record_local_metric('ppl', PPLMetric.many(gen_loss, num_target_tokens))
+        # logging.debug("\tloss : {}".format(gen_loss))
+        # self.record_local_metric('ppl', PPLMetric.many(gen_loss, num_target_tokens))
 
         loss = combined_loss.sum()
 
@@ -373,7 +424,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
     def _construct_label_token_losses(self, labels, model_output):
         # Get non-aggregated losses
-        scores, preds, encoder_states, triple_prob, gate = model_output
+        scores, preds, encoder_states, triple_prob, gate, index_diff = model_output
         score_view = scores.clamp(min=1e-5).reshape(-1, scores.size(-1))
         losses = self.criterion.gen_loss_fn(score_view.log(), labels.view(-1)).view(len(labels), -1)
 
