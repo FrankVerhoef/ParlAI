@@ -232,7 +232,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         else:
             labels = ''
         logging.debug("Labels: {}".format(labels))
-        concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(labels))
+        concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels))
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
         related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], self.matched_concepts, num_hops=self.num_hops, max_B=100)[0]
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
