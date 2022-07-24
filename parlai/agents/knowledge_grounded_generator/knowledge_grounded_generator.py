@@ -27,22 +27,28 @@ class KG_loss(nn.Module):
         B = lm_probs.size(0)
 
         # Compute generation loss
+        num_target_tokens = labels.ne(self.ignore_index).long().sum(dim=-1)
         probs_clamp = lm_probs.clamp(min=1e-5)
-        gen_loss = self.gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1)).view(B, -1).mean(dim=1)
+        gen_loss_token = self.gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1)).view(B, -1)
+        gen_loss = gen_loss_token.sum(dim=-1) / num_target_tokens
 
         # Compute triple loss
         triple_mask = (triple_labels != self.invalid).unsqueeze(1).expand_as(triple_prob).float()
+        num_valid_triples = triple_mask.sum(dim=(-2,-1))
         triple_labels = triple_labels.unsqueeze(1).expand_as(triple_prob) * triple_mask
         triple_loss_fn = nn.BCELoss(weight=triple_mask, reduction='none')
-        triple_loss = triple_loss_fn(triple_prob, triple_labels.float()).view(B, -1).mean(dim=1)
+        triple_loss_triple = triple_loss_fn(triple_prob, triple_labels.float()).view(B, -1)
+        triple_loss = triple_loss_triple.sum(dim=-1) / num_valid_triples
 
         # Compute gate loss   
         gate_mask = (gate_labels != self.invalid).float()
         gate_labels.masked_fill_((gate_labels == self.invalid), 0)
         lm_mask = (gate_labels.sum(1) != 0).float().unsqueeze(1)
         gate_mask = lm_mask.expand_as(gate_labels) * gate_mask
+        num_valid_gates = torch.maximum(gate_mask.sum(dim=-1), torch.ones(B))
         gate_loss_fn = nn.BCELoss(weight=gate_mask, reduction='none')
-        gate_loss = gate_loss_fn(gate.view(B, -1), gate_labels.float()).view(B, -1).mean(dim=1)
+        gate_loss_token = gate_loss_fn(gate.view(B, -1), gate_labels.float()).view(B, -1)
+        gate_loss = gate_loss_token.sum(dim=-1) / num_valid_gates
 
         combined_loss = gen_loss + self.alpha * gate_loss + self.beta * triple_loss
 
