@@ -225,7 +225,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation = super().observe(observation)
 
         # Match with concepts in knowledge graph
-        labels = observation['labels'] if 'labels' in observation.keys() else observation['eval_labels']
+        if 'labels' in observation.keys():
+            labels = observation['labels']
+        elif 'eval_labels' in observation.keys():
+            labels = observation['eval_labels']
+        else:
+            labels = ''
         logging.debug("Labels: {}".format(labels))
         concepts = self.kg.match_mentioned_concepts(observation['text'], ' '.join(labels))
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
