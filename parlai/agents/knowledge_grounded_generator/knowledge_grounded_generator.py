@@ -45,7 +45,7 @@ class KG_loss(nn.Module):
         gate_labels.masked_fill_((gate_labels == self.invalid), 0)
         lm_mask = (gate_labels.sum(1) != 0).float().unsqueeze(1)
         gate_mask = lm_mask.expand_as(gate_labels) * gate_mask
-        num_valid_gates = torch.maximum(gate_mask.sum(dim=-1), torch.ones(B))
+        num_valid_gates = torch.maximum(gate_mask.sum(dim=-1), torch.ones(B, device=gate_mask.device))
         gate_loss_fn = nn.BCELoss(weight=gate_mask, reduction='none')
         gate_loss_token = gate_loss_fn(gate.view(B, -1), gate_labels.float()).view(B, -1)
         gate_loss = gate_loss_token.sum(dim=-1) / num_valid_gates
