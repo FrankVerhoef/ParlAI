@@ -1,4 +1,5 @@
 import torch
+from torch import masked_fill
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -30,7 +31,7 @@ class TripleEncoder(nn.Module):
         logging.info("Initialized TripleEncoder")
 
 
-    def forward(self, concept_ids, relations, head_ids, tail_ids):
+    def forward(self, concept_ids, relations, head_ids, tail_ids, triple_labels):
         """
         Encodes knowledge triples
         Tensor sizes are:
@@ -43,8 +44,8 @@ class TripleEncoder(nn.Module):
             Mt = number of related triples (can vary per batch)
             E = embedding dimension for concepts (is same as embedding dim for relations)
         """
-        # logging.debug("Forward TripleEncoder")
-        # logging.debug("\tEncoding {} concepts and {} relations".format(concept_ids.shape, relations.shape))
+        logging.debug("Forward TripleEncoder")
+        logging.debug("\tEncoding {} concepts and {} relations".format(concept_ids.shape, relations.shape))
 
         start = timer.time()
 
@@ -58,6 +59,7 @@ class TripleEncoder(nn.Module):
             rel_repr,
             head_ids,
             tail_ids,
+            triple_labels,
             layer_number=self.num_hops
         )
 
@@ -66,16 +68,15 @@ class TripleEncoder(nn.Module):
         tail_repr = torch.gather(node_repr, 1, tail_ids.unsqueeze(-1).expand(node_repr.size(0), tail_ids.size(1), node_repr.size(-1)))
         triple_repr = torch.cat((head_repr, rel_repr, tail_repr), dim=-1)
 
-        # logging.debug("\tShape of encoded triples: {}".format(triple_repr.shape))
-        # logging.debug("\ttime TripleEncoder: {}".format(timer.time() - start))
+        logging.debug("\tShape of encoded triples: {}".format(triple_repr.shape))
+        logging.debug("\ttime TripleEncoder: {}".format(timer.time() - start))
         return triple_repr
 
 
-    def comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids, layer_number=2):
+    def comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids, triple_labels, layer_number=2):
         '''
-        concept_repr: B x M x E  (M=max number of related concepts)
-        rel_repr: B x Mt x E (Mt=max number of triples)
-        TODO: implement masking in case batch size != 1
+        concept_repr: B x M x E  (M=number of related concepts)
+        rel_repr: B x Mt x E (Mt=number of triples)
         '''
 
         B = head_ids.size(0)
@@ -88,19 +89,21 @@ class TripleEncoder(nn.Module):
 
             # Initialise update_node for GCN calculation
             update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
-            count = torch.ones_like(head_ids).to(head_ids.device).float()
+            count = torch.ones_like(head_ids).to(head_ids.device).masked_fill_(triple_labels == -1, 0).float()
             count_out = torch.zeros(B, M).to(head_ids.device).float()
 
             # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
             o = concept_hidden.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
+            o = o.masked_fill(triple_labels.unsqueeze(2)== -1, 0)
             scatter_add(o, tail_ids, dim=1, out=update_node)
-            scatter_add(-relation_hidden, tail_ids, dim=1, out=update_node)
+            scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), tail_ids, dim=1, out=update_node)
             scatter_add(count, tail_ids, dim=1, out=count_out)
 
             # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
             o = concept_hidden.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
+            o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
             scatter_add(o, head_ids, dim=1, out=update_node)
-            scatter_add(-relation_hidden, head_ids, dim=1, out=update_node)
+            scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), head_ids, dim=1, out=update_node)
             scatter_add(count, head_ids, dim=1, out=count_out)
 
             # Combine calculated update to form new node and relation representations
@@ -148,7 +151,7 @@ class KnowledgeGroundedDecoder(nn.Module):
                 vocab_map, map_mask 
             ) = encoder_state
             gpt_states = None
-            triple_repr = self.triple_encoder(concept_ids, relation_ids, head_idx, tail_idx)
+            triple_repr = self.triple_encoder(concept_ids, relation_ids, head_idx, tail_idx, triple_labels)
             kg_mem = {
                 "concept_labels": concept_labels,
                 "distances": distances,
