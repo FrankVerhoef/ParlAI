@@ -89,24 +89,24 @@ class TripleEncoder(nn.Module):
 
             # Initialise update_node for GCN calculation
             update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
-            # count = torch.ones_like(head_ids).to(head_ids.device).masked_fill_(triple_labels == -1, 0).float()
-            count = torch.ones_like(head_ids).to(head_ids.device).float()
+            count = torch.ones_like(head_ids).to(head_ids.device).masked_fill_(triple_labels == -1, 0).float()
+            # count = torch.ones_like(head_ids).to(head_ids.device).float()
             count_out = torch.zeros(B, M).to(head_ids.device).float()
 
             # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
             o = concept_hidden.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
-            # o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
+            o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
             scatter_add(o, tail_ids, dim=1, out=update_node)
-            # scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), tail_ids, dim=1, out=update_node)
-            scatter_add(-relation_hidden, tail_ids, dim=1, out=update_node)
+            scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), tail_ids, dim=1, out=update_node)
+            # scatter_add(-relation_hidden, tail_ids, dim=1, out=update_node)
             scatter_add(count, tail_ids, dim=1, out=count_out)
 
             # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
             o = concept_hidden.gather(1, tail_ids.unsqueeze(2).expand(B, Mt, E))
-            # o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
+            o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
             scatter_add(o, head_ids, dim=1, out=update_node)
-            # scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), head_ids, dim=1, out=update_node)
-            scatter_add(-relation_hidden, head_ids, dim=1, out=update_node)
+            scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), head_ids, dim=1, out=update_node)
+            # scatter_add(-relation_hidden, head_ids, dim=1, out=update_node)
             scatter_add(count, head_ids, dim=1, out=count_out)
 
             # Combine calculated update to form new node and relation representations
