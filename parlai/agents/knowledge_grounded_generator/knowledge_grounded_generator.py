@@ -26,17 +26,17 @@ class KG_loss(nn.Module):
     def forward(self, lm_probs, labels, triple_prob, triple_labels, gate, gate_labels):
         B = lm_probs.size(0)
 
-        # Compute overall loss
+        # Compute generation loss
         probs_clamp = lm_probs.clamp(min=1e-5)
         gen_loss = self.gen_loss_fn(probs_clamp.log().view(-1, lm_probs.size(-1)), labels.view(-1)).view(B, -1).mean(dim=1)
 
-        # Compute and record triple loss
+        # Compute triple loss
         triple_mask = (triple_labels != self.invalid).unsqueeze(1).expand_as(triple_prob).float()
         triple_labels = triple_labels.unsqueeze(1).expand_as(triple_prob) * triple_mask
         triple_loss_fn = nn.BCELoss(weight=triple_mask, reduction='none')
         triple_loss = triple_loss_fn(triple_prob, triple_labels.float()).view(B, -1).mean(dim=1)
 
-        # Compute and record gate loss   
+        # Compute gate loss   
         gate_mask = (gate_labels != self.invalid).float()
         gate_labels.masked_fill_((gate_labels == self.invalid), 0)
         lm_mask = (gate_labels.sum(1) != 0).float().unsqueeze(1)
@@ -153,13 +153,31 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
     def __init__(self, opt, shared=None):
         super().__init__(opt, shared)
 
-        self.model_vocab = self.dict.keys()
         self.num_hops = opt['num_hops']
         self.max_concepts = opt['max_concepts']
         self.max_triples = opt['max_triples']
-        self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['kg'])
-        self.matched_concepts = self.match_dataset_concepts(opt['kg_datadir'] + opt['dataset_concepts'])
-        logging.info("Initialized KnowledgeGroundedGeneratorAgent")
+        if shared == None:
+            self.model_vocab = self.dict.keys()
+            self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['kg'])
+            self.matched_concepts = self.match_dataset_concepts(opt['kg_datadir'] + opt['dataset_concepts'])
+            logging.info("Initialized KnowledgeGroundedGeneratorAgent")
+        else:
+            self.model_vocab = shared['model_vocab']
+            self.kg = shared['kg']
+            self.matched_concepts = shared['matched_concepts']
+            logging.info("Initialized KnowledgeGroundedGeneratorAgent [shared]")
+
+
+    def share(self):
+        """
+        Share fields from parent as well as useful objects in this class.
+        """
+        shared = super().share()
+        shared['model_vocab'] = self.model_vocab
+        shared['kg'] = self.kg
+        shared['matched_concepts'] = self.matched_concepts
+
+        return shared
 
 
     def build_model(self):
@@ -195,7 +213,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
     def observe(self, observation):
         logging.debug('=== Observation ===')
-        logging.debug('Text:{}'.format(observation['text']))
+        text = observation['text'] if 'text' in observation.keys() else ''
+        logging.debug('Text:{}'.format(text))
         start = timer.time()
         observation = super().observe(observation)
 
@@ -216,8 +235,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         # TODO: Truncate or pad to max number of concepts and relations
 
         # Info about the related concepts
-        concept_token_ids = [self.dict.txt2vec(' ' + c)[0] for c in filtered_data['concepts']]
-        observation['related_concepts'] = filtered_data['concepts']
+        concept_token_ids = [self.dict.txt2vec(' ' + self.kg.id2concept[id])[0] for id in filtered_data['concept_ids']]
         observation['concept_token_ids'] = torch.LongTensor(concept_token_ids)
         observation['concept_labels'] = torch.LongTensor(filtered_data['labels'])
         observation['distances'] = torch.LongTensor(filtered_data['distances'])
@@ -235,12 +253,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
 
         logging.debug("Related concepts {}: {}".format(
-            len(observation['related_concepts']), 
+            len(filtered_data['concept_ids']), 
             self.kg.formatted_concepts_string(filtered_data, 10)
         ))
         # logging.debug("Translated concepts: {}".format([
-        #     (c, self.dict.vec2txt([self.dict.txt2vec(' ' + c)[0]]))
-        #     for c in filtered_data['concepts']
+        #     (self.kg.id2concept[id], self.dict.vec2txt([self.dict.txt2vec(' ' + self.kg.id2concept[id])[0]]))
+        #     for id in filtered_data['concept_ids']
         # ]))
         logging.debug("Relations {}: {}".format(
             len(observation['head_idx']),
@@ -379,9 +397,9 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         if batch.label_vec is None:
             raise ValueError('Cannot compute loss without a label.')
 
-        # logging.debug("=== Compute Loss === ")
+        logging.debug("=== KGG Compute Loss === ")
         # logging.debug("\tinput: {}\n\tlabel: {}".format(batch.text_vec, batch.label_vec))
-        logging.debug("Size input {}, label {}".format(batch.text_vec.shape, batch.label_vec.shape))
+        # logging.debug("Size input {}, label {}".format(batch.text_vec.shape, batch.label_vec.shape))
         model_output = self.model(*self._model_input(batch), ys=batch.label_vec)
         scores, preds, encoder_states, triple_prob, gate, index_diff = model_output
         # logging.debug("\tpreds: {}".format(preds))
@@ -405,15 +423,16 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             gate, batch.gate_labels
         )
 
-        num_target_tokens = batch.label_vec.ne(self.NULL_IDX).long().sum(dim=-1)
-
+        # record metrics
+        notnull = batch.label_vec.ne(self.NULL_IDX)
+        num_target_tokens = notnull.long().sum(dim=-1)
+        num_correct = ((batch.label_vec == preds) * notnull).sum(dim=-1)
         self.record_local_metric('loss', AverageMetric.many(combined_loss))
         self.record_local_metric('loss_gen', AverageMetric.many(gen_loss))
         self.record_local_metric('loss_triple', AverageMetric.many(triple_loss))
         self.record_local_metric('loss_gate', AverageMetric.many(gate_loss))
-        # logging.debug("\tloss : {}".format(gen_loss))
-        # self.record_local_metric('ppl', PPLMetric.many(gen_loss, num_target_tokens))
-
+        self.record_local_metric('ppl', PPLMetric.many(gen_loss))
+        self.record_local_metric('token_acc', AverageMetric.many(num_correct, num_target_tokens))
         loss = combined_loss.sum()
 
         if return_output:

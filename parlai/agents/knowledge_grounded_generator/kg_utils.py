@@ -188,6 +188,7 @@ class ConceptGraph(nx.Graph):
         """
         
         cpnet = pickle.load(open(graph_path, "rb"))
+        self.graph = cpnet
         logging.info("Loaded knowledge graph with {} nodes and {} edges".format(len(cpnet.nodes), len(cpnet.edges)))
 
         cpnet_simple = nx.Graph()
@@ -199,7 +200,6 @@ class ConceptGraph(nx.Graph):
                 cpnet_simple.add_edge(u, v, weight=w)
         logging.debug("Built simplified graph with {} nodes and {} edges".format(len(cpnet_simple.nodes), len(cpnet_simple.edges)))
 
-        self.graph = cpnet
         self.simple_graph = cpnet_simple
 
 
@@ -233,9 +233,7 @@ class ConceptGraph(nx.Graph):
         # for c in doc.noun_chunks:
         #     if c.root.text in self.vocab and c.root.text not in blacklist:
         #         res.add(c.root.text)
-    #            print("added ", c.root.text, c.text)
-    #        else:
-    #            print("skipped ", c.root.text, c.text)
+
 
         return res
 
@@ -263,63 +261,43 @@ class ConceptGraph(nx.Graph):
 
     def find_neighbours(self, source_concepts, target_concepts, dataset_concepts, num_hops, max_B=100):
         """
-            Find ...
+            Find neighboring concepts within num_hops and the connecting triples
         """
         # logging.debug("Finding neighbours for {} and {}".format(source_concepts, target_concepts))
         source = [self.concept2id[s_cpt] for s_cpt in source_concepts]  # id's in knowledge graph of the source concepts 
         start = source                              # start init contains id's of source concepts
         Vts = dict([(x,0) for x in start])          # Vts init contains id's of concepts in knowledge graph, with distance 0
         Ets = {}
-        #dataset_concept2id_set = set(dataset_concept2id)
-        for t in range(num_hops):      # T is number of hops
+        for t in range(num_hops):
             V = {}
-            templates = []
             for s in start:
                 if s in self.simple_graph:
                     # logging.debug("Check neighbors of: {}".format(self.id2concept[s]))
-                    for n in self.simple_graph[s]:       # loops through the neighbors
+                    for n in self.simple_graph[s]:   # loops through the neighbors
                         if n not in Vts and self.id2concept[n] in dataset_concepts:
                             if n not in Vts:
-                                if n not in V:      # if not yet reached, add to 'V' with frequency
-                                    # logging.debug("New node: {}".format(self.id2concept[n]))
+                                if n not in V:       # if not yet reached, add to 'V' with frequency
                                     V[n] = 1
                                 else:
-                                    V[n] += 1       # if already reached, increase frequency
-
-                            if n not in Ets:
-                                rels = self.get_edge(s, n)   # list of relation types between s and n
-                                if len(rels) > 0:
+                                    V[n] += 1        # if already reached, increase frequency
+                            rels = self.get_edge(s, n)   # list of relation types between s and n
+                            if len(rels) > 0:
+                                if n not in Ets:
                                     Ets[n] = {s: rels}  
-                            else:
-                                rels = self.get_edge(s, n)
-                                if len(rels) > 0:
+                                else:
                                     Ets[n].update({s: rels})
-                        # else:
-                            # logging.debug("Not added: {}".format(self.id2concept[n]))
-                # else:
-                    # logging.debug("Not in simple graph: {}".format(self.id2concept[s]))
                             
-            V = list(V.items())         # convert from dict to list
+            V = list(V.items())                     # convert from dict to list
             count_V = sorted(V, key=lambda x: x[1], reverse=True)[:max_B] # select most frequently visited
             start = [x[0] for x in count_V if self.id2concept[x[0]] in dataset_concepts] # update start to the newly visited nodes
             
             # Add nodes to Vts, with distance increased by 1
             Vts.update(dict([(x, t+1) for x in start]))
-
-            # logging.debug("\tResult after hop {}: \t{} new nodes (max 10): {}".format(
-            #     t, len(V), V[:10]
-            # ))
         
-        # Unclear what the purpose is of these lines. Doesn't seem to change concepts & distances
-        _concept_ids = list(Vts.keys())
-        _distances = list(Vts.values())
-        concept_ids = []
-        distances = []
-        for c, d in zip(_concept_ids, _distances):
-            concept_ids.append(c)
-            distances.append(d)
+        concept_ids = [id for id in Vts.keys()]
+        distances = [d for d in Vts.values()]
         assert(len(concept_ids) == len(distances))
-        
+
         # Contruct tuples with triples
         triples = []
         for v, N in Ets.items():
@@ -327,35 +305,25 @@ class ConceptGraph(nx.Graph):
                 for u, rels in N.items():
                     if u in concept_ids:
                         triples.append((u, rels, v))
-        
         target_ids = [self.concept2id[t_cpt] for t_cpt in target_concepts]   #id's of nodes in the concept graph of target concepts
 
         # Construct a list with labels; if the T-hop concept appears in target, then corresponding label is 1
-        labels = []
-        found_num = 0
-        for c in concept_ids:  
-            if c in target_ids:
-                found_num += 1
-                labels.append(1)
-            else:
-                labels.append(0)
+        labels = [int(c in target_ids) for c in concept_ids]
         
         # Translate concept id's and relation id's back to text for interpretability
-        concepts = [self.id2concept[c] for c in concept_ids]   # concept strings of concepts within T hops of source
-        triples_text = [(self.id2concept[u], [self.id2relation[r] for r in rels], self.id2concept[v]) for (u, rels, v) in triples]
-
+        # concepts = [self.id2concept[c] for c in concept_ids] 
+        # triples_text = [(self.id2concept[u], [self.id2relation[r] for r in rels], self.id2concept[v]) for (u, rels, v) in triples]
         # logging.debug("\tReturn {} concepts and {} triples".format(len(concepts), len(triples)))
-        return {"concepts":concepts, "labels":labels, "distances":distances, "triples":triples}, found_num, len(concepts)
+
+        return {"concept_ids":concept_ids, "labels":labels, "distances":distances, "triples":triples}, sum(labels), len(concept_ids)
 
 
     def filter_directed_triple(self, related_concepts, max_concepts=64, max_triples=256, max_neighbors=8):
 
-        concepts = related_concepts['concepts']
+        concept_ids = related_concepts['concept_ids']
         labels = related_concepts['labels']
         distances = related_concepts['distances']
         triples = related_concepts['triples']
-
-        concept_ids = [self.concept2id[c] for c in concepts]
 
         triple_dict = {}
         for t in triples:
@@ -369,49 +337,34 @@ class ConceptGraph(nx.Graph):
                     if len(triple_dict[t[-1]]) < max_neighbors:
                         triple_dict[t[-1]].append(t)
 
-        starts = []
-        for l, id in zip(labels, concept_ids):
-            if l == 1:
-                starts.append(id)
-
-        sources = []
-        for d, id in zip(distances, concept_ids):
-            if d == 0:
-                sources.append(id)
-
+        starts = [id for id, l in zip(concept_ids, labels) if l == 1]
+        sources = [id for id, d in zip(concept_ids, distances) if d == 0]
         shortest_paths = []
         for start in starts:
             shortest_paths.extend(bfs(start, triple_dict, sources))
 
-        ground_truth_triples = []
-        for path in shortest_paths:
-            for i, n in enumerate(path[:-1]):
-                ground_truth_triples.append((n, path[i+1]))
-        ground_truth_triples_set = set(ground_truth_triples)
+        ground_truth_triples_set = set([
+            (n, path[i+1]) 
+            for path in shortest_paths 
+            for i, n in enumerate(path[:-1])
+        ])
 
-        _triples = []
-        triple_labels = []
-        for k,v in triple_dict.items():
-            for t in v:
-                _triples.append(t)
-                if (t[-1], t[0]) in ground_truth_triples_set:
-                    triple_labels.append(1)
-                else:
-                    triple_labels.append(0)
+        heads, tails, relations, triple_labels = [], [], [], []
+        triple_count = 0
+        for v in triple_dict.values():
+            for (head, rels, tail) in v:
+                max_reached = triple_count >= max_triples
+                if max_reached: break
+                heads.append(concept_ids.index(head))
+                tails.append(concept_ids.index(tail))
+                relations.append(rels[0])   # Keep only one relation
+                triple_labels.append(int((tail, head) in ground_truth_triples_set))
+                triple_count += 1
+            if max_reached: break
 
-        concepts = concepts[:max_concepts]
-        _triples = _triples[:max_triples]
-        triple_labels = triple_labels[:max_triples]
-
-        heads = []
-        tails = []
-        for triple in _triples:
-            heads.append(concept_ids.index(triple[0]))
-            tails.append(concept_ids.index(triple[-1]))
-
-        related_concepts['relation_ids'] = [triple[1][0] for triple in _triples] # Keep only one relation
         related_concepts['head_idx'] = heads
         related_concepts['tail_idx'] = tails
+        related_concepts['relation_ids'] = relations
         related_concepts['triple_labels'] = triple_labels
         related_concepts.pop('triples')
             
@@ -419,7 +372,7 @@ class ConceptGraph(nx.Graph):
 
 
     def formatted_concepts_string(self, related_concepts, max):
-        concepts = related_concepts['concepts']
+        concepts = [self.id2concept[id] for id in related_concepts['concept_ids']]
         if len(concepts) > max and max > 4:
             return 'Examples: ' + ', '.join(concepts[:max//2]) + ' ... ' + ', '.join(concepts[-max//2:])
         else:
@@ -430,13 +383,12 @@ class ConceptGraph(nx.Graph):
         n = max if len(related_concepts['relation_ids']) > max else len(related_concepts['relation_ids'])
         return ', '.join([
             '({}, {}, {}) '.format(
-                related_concepts['concepts'][related_concepts['head_idx'][i]],
+                self.id2concept[related_concepts['concept_ids'][related_concepts['head_idx'][i]]],
                 self.id2relation[related_concepts['relation_ids'][i]],
-                related_concepts['concepts'][related_concepts['tail_idx'][i]]
+                self.id2concept[related_concepts['concept_ids'][related_concepts['tail_idx'][i]]]
             )
             for i in range(n)
         ])
-
 
 
 def bfs(start, triple_dict, source):
@@ -456,7 +408,6 @@ def bfs(start, triple_dict, source):
                 for triple in triples:
                     new_paths.append(path + [triple[0]])
 
-        #print(new_paths)
         for path in new_paths:
             if path[-1] in source:
                 stop = True
