@@ -166,6 +166,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             self.model_vocab = self.dict.keys()
             self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['kg'])
             self.matched_concepts = self.match_dataset_concepts(opt['kg_datadir'] + opt['dataset_concepts'])
+            self.kg.build_reduced_graph(self.matched_concepts)
             logging.info("Initialized KnowledgeGroundedGeneratorAgent")
         else:
             self.model_vocab = shared['model_vocab']
@@ -196,9 +197,10 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
         with open(concepts_path, 'r') as f:
             total_concepts = set([line[:-1] for line in f])
-        matched_ids = (total_concepts - blacklist).intersection(self.kg.concept2id.keys())
-        logging.debug("Matched {} of {} dataset tokens with concepts in knowledgegraph".format(len(matched_ids), len(total_concepts)))
-        return matched_ids
+        graph_concepts = [self.kg.id2concept[id] for id in self.kg.graph.nodes]
+        matched_concepts = (total_concepts - blacklist).intersection(graph_concepts)
+        logging.debug("Matched {} of {} dataset tokens with concepts in knowledgegraph".format(len(matched_concepts), len(total_concepts)))
+        return matched_concepts
 
 
     def build_vocab_map(self, concept_token_ids):
@@ -234,7 +236,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         logging.debug("Labels: {}".format(labels))
         concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels))
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
-        related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], self.matched_concepts, num_hops=self.num_hops, max_B=100)[0]
+        related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)[0]
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
 
         # Construct list with gate_labels
