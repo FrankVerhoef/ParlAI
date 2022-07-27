@@ -164,12 +164,14 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         self.max_triples = opt['max_triples']
         if shared == None:
             self.model_vocab = self.dict.keys()
+            self._cache_sorted_dict_ind = sorted(self.dict.ind2tok.keys())
             self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['kg'])
             self.matched_concepts = self.match_dataset_concepts(opt['kg_datadir'] + opt['dataset_concepts'])
             self.kg.build_reduced_graph(self.matched_concepts)
             logging.info("Initialized KnowledgeGroundedGeneratorAgent")
         else:
             self.model_vocab = shared['model_vocab']
+            self._cache_sorted_dict_ind = shared['cache_dict_ind'] 
             self.kg = shared['kg']
             self.matched_concepts = shared['matched_concepts']
             logging.info("Initialized KnowledgeGroundedGeneratorAgent [shared]")
@@ -181,6 +183,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         """
         shared = super().share()
         shared['model_vocab'] = self.model_vocab
+        shared['cache_dict_ind'] = self._cache_sorted_dict_ind
         shared['kg'] = self.kg
         shared['matched_concepts'] = self.matched_concepts
 
@@ -205,59 +208,66 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
     def build_vocab_map(self, concept_token_ids):
 
-        vocab_map, map_mask = [], []
-        for token_id in sorted(self.dict.ind2tok.keys()):
+        vocab_map = torch.zeros(len(self._cache_sorted_dict_ind), dtype=torch.long)
+        map_mask = torch.zeros_like(vocab_map)
+        for i, token_id in enumerate(self._cache_sorted_dict_ind):
             try: 
                 pos = concept_token_ids.index(token_id)
-                vocab_map.append(pos)
-                map_mask.append(1)
-            except:
-                vocab_map.append(0)
-                map_mask.append(0)
-        assert(len(vocab_map) == len(self.model_vocab))
+                vocab_map[i] = pos
+                map_mask[i] = 1
+            except ValueError:
+                pass
 
         return vocab_map, map_mask
 
 
     def observe(self, observation):
         logging.debug('=== Observation ===')
-        text = observation['text'] if 'text' in observation.keys() else ''
-        logging.debug('Text:{}'.format(text))
+
         start = timer.time()
         observation = super().observe(observation)
+        time_super = timer.time()
 
-        # Match with concepts in knowledge graph
+        if 'full_text' in observation.keys():
+            text = observation['full_text']
+        elif 'text' in observation.keys():
+            text = observation['text']
+        else:
+            text = ''
+        logging.debug('Text:{}'.format(text))
+
         if 'labels' in observation.keys():
             labels = observation['labels']
         elif 'eval_labels' in observation.keys():
             labels = observation['eval_labels']
         else:
-            labels = ''
+            labels = []
         logging.debug("Labels: {}".format(labels))
+
+        # Match with concepts in knowledge graph
         concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels))
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
         related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)[0]
+        time_related = timer.time()
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
+        time_filter = timer.time()
 
         # Construct list with gate_labels
         target_concept_ids = [self.dict.txt2vec(' ' + c)[0] for c in concepts['ac']]
-        label_ids = self.dict.txt2vec(labels[0])
+        label_ids = self.dict.txt2vec(labels[0]) if len(labels) > 0 else []
         gate_labels = [1 if x in target_concept_ids else 0 for x in label_ids] + [0] # add 0 for end-token
-
-        # TODO: Think of alternative way to match concepts to tokens
-        # TODO: Truncate or pad to max number of concepts and relations
 
         # Info about the related concepts
         concept_token_ids = [self.dict.txt2vec(' ' + self.kg.id2concept[id])[0] for id in filtered_data['concept_ids']]
+        time_t2v = timer.time()
         observation['concept_token_ids'] = torch.LongTensor(concept_token_ids)
         observation['concept_labels'] = torch.LongTensor(filtered_data['labels'])
         observation['distances'] = torch.LongTensor(filtered_data['distances'])
         observation['gate_labels'] = torch.LongTensor(gate_labels)
 
         # Info how to map concepts to vocab
-        vocab_map, map_mask = self.build_vocab_map(concept_token_ids)
-        observation['vocab_map'] = torch.LongTensor(vocab_map)
-        observation['map_mask'] = torch.LongTensor(map_mask)
+        observation['vocab_map'], observation['map_mask'] = self.build_vocab_map(concept_token_ids)
+        time_map = timer.time()
 
         # Info about relations to related concepts
         observation['relation_ids'] = torch.LongTensor(filtered_data['relation_ids'])
@@ -265,25 +275,29 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation['tail_idx'] = torch.LongTensor(filtered_data['tail_idx'])
         observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
 
-        logging.debug("Related concepts {}: {}".format(
-            len(filtered_data['concept_ids']), 
-            self.kg.formatted_concepts_string(filtered_data, 10)
-        ))
+        # logging.debug("Related concepts {}: {}".format(
+        #     len(filtered_data['concept_ids']), 
+        #     self.kg.formatted_concepts_string(filtered_data, 10)
+        # ))
         # logging.debug("Translated concepts: {}".format([
         #     (self.kg.id2concept[id], self.dict.vec2txt([self.dict.txt2vec(' ' + self.kg.id2concept[id])[0]]))
         #     for id in filtered_data['concept_ids']
         # ]))
-        logging.debug("Relations {}: {}".format(
-            len(observation['head_idx']),
-            self.kg.formatted_triples_string(filtered_data, 5)
-        ))
-        logging.debug("Observation time: {}".format(timer.time() - start))
+        # logging.debug("Relations {}: {}".format(
+        #     len(observation['head_idx']),
+        #     self.kg.formatted_triples_string(filtered_data, 5)
+        # ))
+        time_obs = timer.time()
+        logging.debug("Times super {:6.4f}, related {:6.4f}, filter {:6.4f}, t2v {:6.4f}, map {:6.4f}, obs {:6.4f}".format(
+            time_super-start, time_related-time_super, time_filter-time_related, time_t2v-time_filter,
+            time_map-time_t2v, time_obs-time_map))
+        logging.debug("Observation time: {:6.4f}".format(timer.time() - start))
 
         ## log statistics
         # Number of concepts in the input
         # self.global_metrics.add('src_cpt', AverageMetric(len(concepts['qc']), 1))
-        # Fraction of target tokens that is a concept
-        # self.global_metrics.add('gate_label', AverageMetric(sum(gate_labels)/len(label_ids), 1))
+        # Fraction of target tokens that is a concept reachable within max number of hops
+        self.global_metrics.add('gate_label', AverageMetric(sum(gate_labels)/len(label_ids), 1))
 
         return observation
 
@@ -412,8 +426,11 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
         logging.debug("=== KGG Compute Loss === ")
         # logging.debug("\tinput: {}\n\tlabel: {}".format(batch.text_vec, batch.label_vec))
-        # logging.debug("Size input {}, label {}".format(batch.text_vec.shape, batch.label_vec.shape))
+        logging.debug("Size input {}, label {}".format(batch.text_vec.shape, batch.label_vec.shape))
+        start = timer.time()
+    
         model_output = self.model(*self._model_input(batch), ys=batch.label_vec)
+        time_fwd = timer.time()
         scores, preds, encoder_states, triple_prob, gate, index_diff = model_output
         # logging.debug("\tpreds: {}".format(preds))
         # for i, (p, c, l) in enumerate(zip(preds, index_diff, batch.label_vec)):
@@ -435,6 +452,9 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             triple_prob, batch.triple_labels, 
             gate, batch.gate_labels
         )
+        time_loss = timer.time()
+        logging.debug("\tforward {}".format(time_fwd-start))
+        logging.debug("\tloss_fn {}".format(time_loss-time_fwd))
 
         # record metrics
         notnull = batch.label_vec.ne(self.NULL_IDX)
