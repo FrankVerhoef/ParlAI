@@ -9,7 +9,8 @@ HEAD=0
 REL=1
 TAIL=2
 
-nlp = spacy.load('en_core_web_sm')
+nlp = spacy.load('en_core_web_sm', disable=['parser', 'lemmatizer'])
+
 blacklist = set([
     "persona", 
     "be", "am", "is", "are", "was", "were", "being", "been",
@@ -25,7 +26,6 @@ blacklist = set([
     "need",
     "ought"
 ])
-#nlp = spacy.load('en_core_web_sm', disable=['ner', 'parser', 'textcat'])
 
 
 def read_csv(data_path="train/source.csv"):
@@ -207,16 +207,17 @@ class ConceptGraph(nx.Graph):
         
         concept_ids = [id for id in Vts.keys()]
         distances = [d for d in Vts.values()]
-        assert(len(concept_ids) == len(distances))
 
-        # Contruct tuples with triples
+        # Construct tuples with triples
         triples = []
         for v, N in Ets.items():
             if v in concept_ids:
                 for u, rels in N.items():
                     if u in concept_ids:
                         triples.append((u, rels, v))
-        target_ids = [self.concept2id[t_cpt] for t_cpt in target_concepts]   #id's of nodes in the concept graph of target concepts
+
+        # id's of nodes in the concept graph of target concepts
+        target_ids = [self.concept2id[t_cpt] for t_cpt in target_concepts]   
 
         # Construct a list with labels; if the T-hop concept appears in target, then corresponding label is 1
         labels = [int(c in target_ids) for c in concept_ids]
@@ -262,8 +263,8 @@ class ConceptGraph(nx.Graph):
 
         heads, tails, relations, triple_labels = [], [], [], []
         triple_count = 0
-        for triple in triple_dict.values():
-            for (head, rels, tail) in triples:
+        for triple_list in triple_dict.values():
+            for (head, rels, tail) in triple_list:
                 max_reached = triple_count >= max_triples
                 if max_reached: break
                 heads.append(concept_ids.index(head))
@@ -272,6 +273,14 @@ class ConceptGraph(nx.Graph):
                 triple_labels.append(int((tail, head) in ground_truth_triples_set))
                 triple_count += 1
             if max_reached: break
+
+        logging.debug("Connecting paths: {} with {} triples; kept {} triples with {} targets".format(
+            len(shortest_paths), len(ground_truth_triples_set), len(triple_labels), sum(triple_labels)
+        ))
+        logging.debug("Examples: {}".format([
+            " + ".join([self.id2concept[n] for n in p])
+            for p in shortest_paths
+        ][:5]))
 
         related_concepts['head_idx'] = heads
         related_concepts['tail_idx'] = tails
