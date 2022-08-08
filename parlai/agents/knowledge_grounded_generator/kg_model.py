@@ -128,11 +128,14 @@ class KnowledgeGroundedDecoder(nn.Module):
         self.gpt2model = GPT2Decoder(opt, dict)
         self.lm_head = nn.Linear(opt['embedding_size'], len(dict.keys()), bias=False)
         self.lm_head.weight = self.gpt2model.transformer.wte.weight
+        if opt['fixed_lm'] == True:
+            self.fix_lm_weights()
 
         # Model and parameters for knowledge model
         self.num_hops = opt['num_hops']
         self.gamma = opt['gamma']
         self.aggregate_method = opt['aggregate_method']
+        self.allow_targets_in_source = opt['allow_targets_in_source']
         self.triple_encoder = TripleEncoder(self.gpt2model.transformer.wte, self.num_hops)
         self.triple_linear = nn.Linear(opt['embedding_size'] * 3, opt['embedding_size'], bias=False)
 
@@ -143,9 +146,14 @@ class KnowledgeGroundedDecoder(nn.Module):
         logging.info("Initialized KnowledgeGroundedDecoder")
 
 
+    def fix_lm_weights(self):
+        for param in self.gpt2model.parameters():
+            param.requires_grad = False
+
+
     def forward(self, decoder_input, encoder_state, incr_state=None):
 
-        logging.debug("Forward KnowledgeGroundedDecoder")
+        # logging.debug("Forward KnowledgeGroundedDecoder")
 
         if incr_state is None:
             (
@@ -168,10 +176,10 @@ class KnowledgeGroundedDecoder(nn.Module):
             }
         else:
             (
-                input_ids, gpt_states, triple_prob, gate, index_diff, kg_mem
+                input_ids, gpt_states, triple_prob, gate, is_concept, lm_probs, concept_probs, kg_mem
             ) = incr_state
 
-        (probs, gate, triple_prob, index_diff), gpt_states = self.knowledge_grounded_probs(
+        (probs, gate, triple_prob, is_concept, lm_probs, concept_probs), gpt_states = self.knowledge_grounded_probs(
             decoder_input, 
             input_ids,
             gpt_states,
@@ -179,7 +187,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         )
 
         incr_state = (
-            input_ids, gpt_states, triple_prob, gate, index_diff, kg_mem
+            input_ids, gpt_states, triple_prob, gate, is_concept, lm_probs, concept_probs, kg_mem
         )
 
         return probs, incr_state
@@ -236,9 +244,9 @@ class KnowledgeGroundedDecoder(nn.Module):
         # logging.debug("Highest concept index {}".format(torch.max(concept_probs_vocab, dim=-1)))
         probs = gate * concept_probs_vocab + (1 - gate) * lm_probs
         # logging.debug("Highest overall index {}, with gate {}".format(torch.max(probs, dim=-1), gate))
-        index_diff = (torch.argmax(probs, dim=-1) != torch.argmax(lm_probs, dim=-1)).float()
+        is_concept = (torch.argmax(probs, dim=-1) != torch.argmax(lm_probs, dim=-1)).long()
 
-        return (probs, gate, triple_prob, index_diff), gpt_states
+        return (probs, gate, triple_prob, is_concept, lm_probs, concept_probs_vocab), gpt_states
 
 
     def multi_hop(self, triple_prob, kg_mem):
@@ -281,12 +289,12 @@ class KnowledgeGroundedDecoder(nn.Module):
                 scatter_mean(update_value, tail, dim=-1, out=out)
             out.masked_fill_((kg_mem["concept_labels"] == -1).unsqueeze(1), 0)           
             concept_scores.append(out)
-        
-        # Assign large negative value to start-nodes
-        # Apply decay factor for concept scores that are further away from source
-        total_concept_score = final_mask * -1e5 # torch.zeros_like(node_score)
+             
+        total_concept_score = final_mask
+        if not self.allow_targets_in_source:
+            total_concept_score *= -1e5     # Punish start-nodes by assigning large negative value
         for score in concept_scores[1:]:
-            total_concept_score += score # * 0.8 ** distance
+            total_concept_score += score
         # B x L x M
 
         return total_concept_score
@@ -319,8 +327,8 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
         encoder_states = prev_enc if prev_enc is not None else self.encoder(*xs)
 
         # use teacher forcing
-        scores, preds, triple_probs, gate, index_diff = self.decode_forced(encoder_states, ys)
-        return scores, preds, encoder_states, triple_probs, gate, index_diff
+        scores, preds, triple_probs, gate, is_concept, lm_probs, concept_probs = self.decode_forced(encoder_states, ys)
+        return scores, preds, encoder_states, triple_probs, gate, is_concept, lm_probs, concept_probs
         
 
     def reorder_encoder_states(self, encoder_states, indices):
@@ -329,7 +337,7 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
 
     def reorder_decoder_incremental_state(self, incr_state, indices):
 
-        input_ids, gpt_states, triple_prob, gate, index_diff, kg_mem = incr_state
+        input_ids, gpt_states, triple_prob, gate, is_concept, lm_probs, concept_probs, kg_mem = incr_state
         new_gpt_state = []
         for layer_past in gpt_states:
             if torch.is_tensor(layer_past):
@@ -345,7 +353,9 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
             tuple(new_gpt_state),
             torch.index_select(triple_prob, 0, indices), 
             torch.index_select(gate, 0, indices), 
-            torch.index_select(index_diff, 0, indices), 
+            torch.index_select(is_concept, 0, indices), 
+            torch.index_select(lm_probs, 0, indices), 
+            torch.index_select(concept_probs, 0, indices), 
             {k: torch.index_select(v, 0, indices) for k, v in kg_mem.items()}
         ])
 
@@ -365,10 +375,10 @@ class KnowledgeGroundedModel(TorchGeneratorModel):
         inputs = ys.narrow(1, 0, seqlen - 1)
         latent, final_state = self.decoder(inputs, encoder_states)
         (
-            input_ids, gpt_states, triple_prob, gate, index_diff, kg_mem
+            input_ids, gpt_states, triple_prob, gate, is_concept, lm_probs, concept_probs, kg_mem
         ) = final_state
         logits = self.output(latent)
         _, preds = logits.max(dim=2)
-        return logits, preds, triple_prob, gate, index_diff
+        return logits, preds, triple_prob, gate, is_concept, lm_probs, concept_probs
 
 

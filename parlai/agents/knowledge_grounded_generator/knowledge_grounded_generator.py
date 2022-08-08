@@ -153,6 +153,18 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             choices=["avg", "max"],
             help="How to aggregate probabilities on graph nodes."
         )
+        group.add_argument(
+            "--fixed-lm",
+            type=bool,
+            default=False,
+            help="Freeze the weights of the GPT2 language model during training."
+        )
+        group.add_argument(
+            "--allow-targets-in-source",
+            type=bool,
+            default=False,
+            help="If true, allows repetition of concepts in source; otherwise stimulates generation of new related concepts."
+        )
         return parser
 
 
@@ -162,6 +174,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         self.num_hops = opt['num_hops']
         self.max_concepts = opt['max_concepts']
         self.max_triples = opt['max_triples']
+        self.allow_targets_in_source = opt['allow_targets_in_source']
         if shared == None:
             self.model_vocab = self.dict.keys()
             self._cache_sorted_dict_ind = sorted(self.dict.ind2tok.keys())
@@ -197,17 +210,36 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
 
     def match_dataset_concepts(self, concepts_path):
+        """
+        Returns the set of concepts that appear in both the dataset and in the knowledge graph, 
+        and are not on the blacklist
+        """
 
+        # total_concepts is the set of concepts that appears in the dataset (train and validation dialogues)
         with open(concepts_path, 'r') as f:
             total_concepts = set([line[:-1] for line in f])
+
+        # graph_concepts is the list of concepts in the knowledge graph
         graph_concepts = [self.kg.id2concept[id] for id in self.kg.graph.nodes]
+
+        # matched concepts is the dataset concepts, minus words on the blacklist (e.g. auxiliary verbs) 
+        # that also appear in the knowledge graph
         matched_concepts = (total_concepts - blacklist).intersection(graph_concepts)
-        logging.debug("Matched {} of {} dataset tokens with concepts in knowledgegraph".format(len(matched_concepts), len(total_concepts)))
+
+        logging.info("Matched {} of {} dataset tokens with {} concepts in knowledgegraph".format(
+            len(matched_concepts), len(total_concepts), len(graph_concepts)
+        ))
         return matched_concepts
 
 
     def build_vocab_map(self, concept_token_ids):
-
+        """
+        The vocab map and associated mask are a mapping between the GPT2 vocabulary and the KG concepts
+        in the current observation.
+        At each position in the vocab map, the value is the index in the list of concepts that are 
+        present in the observation. The vocab mask and map mask are used in the KGG-model to map the 
+        calculated concept-scores back to token-scores in the GPT2 vocabulary.
+        """
         vocab_map = torch.zeros(len(self._cache_sorted_dict_ind), dtype=torch.long)
         map_mask = torch.zeros_like(vocab_map)
         for i, token_id in enumerate(self._cache_sorted_dict_ind):
@@ -238,16 +270,19 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
         if 'labels' in observation.keys():
             labels = observation['labels']
+            labels_vec = observation['labels_vec']
         elif 'eval_labels' in observation.keys():
             labels = observation['eval_labels']
+            labels_vec = observation['eval_labels_vec']
         else:
             labels = []
+            labels_vec = torch.tensor([])
         logging.debug("Labels: {}".format(labels))
 
         # Match with concepts in knowledge graph
-        concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels))
+        concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels), self.allow_targets_in_source)
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
-        related_concepts = self.kg.find_neighbours(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)[0]
+        related_concepts = self.kg.find_neighbours_nx(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)
         time_related = timer.time()
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
         time_filter = timer.time()
@@ -288,16 +323,29 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         #     self.kg.formatted_triples_string(filtered_data, 5)
         # ))
         time_obs = timer.time()
-        logging.debug("Times super {:6.4f}, related {:6.4f}, filter {:6.4f}, t2v {:6.4f}, map {:6.4f}, obs {:6.4f}".format(
-            time_super-start, time_related-time_super, time_filter-time_related, time_t2v-time_filter,
-            time_map-time_t2v, time_obs-time_map))
+        # logging.debug("Times super {:6.4f}, related {:6.4f}, filter {:6.4f}, t2v {:6.4f}, map {:6.4f}, obs {:6.4f}".format(
+        #     time_super-start, time_related-time_super, time_filter-time_related, time_t2v-time_filter,
+        #     time_map-time_t2v, time_obs-time_map))
         logging.debug("Observation time: {:6.4f}".format(timer.time() - start))
 
         ## log statistics
         # Number of concepts in the input
         # self.global_metrics.add('src_cpt', AverageMetric(len(concepts['qc']), 1))
         # Fraction of target tokens that is a concept reachable within max number of hops
-        self.global_metrics.add('gate_label', AverageMetric(sum(gate_labels)/len(label_ids), 1))
+        logging.debug("Target: {}".format(''.join([
+            '\033[48;5;{}m'.format(46 if gate_labels[i] == 1 else 231) \
+            + self.dict.vec2txt([token_id]) \
+            + '\033[0;0m'
+            for i, token_id in enumerate(labels_vec)
+        ])))
+        self.global_metrics.add(
+            'gate_label', 
+            AverageMetric(sum(gate_labels)/max(len(label_ids), 1), 1)
+        )
+        self.global_metrics.add(
+            'triple_label', 
+            AverageMetric(sum(observation['triple_labels'])/max(len(observation['triple_labels']), 1), 1)
+        )
 
         return observation
 
@@ -431,7 +479,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
     
         model_output = self.model(*self._model_input(batch), ys=batch.label_vec)
         time_fwd = timer.time()
-        scores, preds, encoder_states, triple_prob, gate, index_diff = model_output
+        scores, preds, encoder_states, triple_prob, gate, is_concept, lm_probs, concept_probs = model_output
         # logging.debug("\tpreds: {}".format(preds))
         # for i, (p, c, l) in enumerate(zip(preds, index_diff, batch.label_vec)):
         #     logging.debug("Example {}: {} concepts inserted: {}".format(
@@ -476,22 +524,27 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
     def _construct_label_token_losses(self, labels, model_output):
         # Get non-aggregated losses
-        scores, preds, encoder_states, triple_prob, gate, index_diff = model_output
+        scores, preds, encoder_states, triple_prob, gate, is_concept, lm_probs, concept_probs = model_output
         score_view = scores.clamp(min=1e-5).reshape(-1, scores.size(-1))
         losses = self.criterion.gen_loss_fn(score_view.log(), labels.view(-1)).view(len(labels), -1)
 
         # Zip decoded tokens with losses
         token_losses = []
-        for i, label in enumerate(labels):
+        for i, l in enumerate(labels):
             token_losses.append(
                 list(
                     zip(
-                        [self.dict[token] for token in label.tolist()],
+                        [self.dict.vec2txt(token) for token in l.tolist()],
                         losses[i].tolist(),
                     )
                 )
             )
         return token_losses
+
+
+    def _construct_generated_token_details(self, tokens, tokens_metadata):
+        tokens_as_txt = [self.dict.vec2txt(token) for token in tokens.tolist()]
+        return list(zip(tokens_as_txt, tokens_metadata))
 
 
     def build_criterion(self):

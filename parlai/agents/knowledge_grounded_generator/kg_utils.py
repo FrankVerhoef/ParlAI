@@ -151,25 +151,78 @@ class ConceptGraph(nx.Graph):
         return res
 
 
-    def match_mentioned_concepts(self, sent, answer):
+    def match_mentioned_concepts(self, sent, answer, allow_targets_in_source=False):
         """
             Returns a dict with sentence from source, sentence from answer and the concepts
             from those sentences
         """
 
-        all_concepts = self.hard_ground(sent + ' ' + answer)
         question_concepts = self.hard_ground(sent)
-        answer_concepts = all_concepts - question_concepts
+        if not allow_targets_in_source:
+            all_concepts = self.hard_ground(sent + ' ' + answer)
+            answer_concepts = all_concepts - question_concepts
+        else:
+            answer_concepts = self.hard_ground(answer)
         return {"sent": sent, "ans": answer, "qc": list(question_concepts), "ac": list(answer_concepts)}
 
 
-    def get_edge(self, src_concept, tgt_concept):
+    def get_relations(self, src_concept, tgt_concept):
             
         try:
             rel_list = self.graph[src_concept][tgt_concept]
             return list(set([rel_list[item]["rel"] for item in rel_list]))
         except:
             return []
+
+    def find_neighbours_nx(self, source_concepts, target_concepts, num_hops, max_B=100):
+        """
+            Find neighboring concepts within num_hops and the connecting triples
+            Use graph functions from networkx
+        """
+        # id's in knowledge graph of the source and target concepts   
+        source_ids = set(self.concept2id[s_cpt] for s_cpt in source_concepts)
+        target_ids = [self.concept2id[t_cpt] for t_cpt in target_concepts]
+        all_concepts = self.simple_graph.nodes
+
+        # Vts init contains id's of source concepts with distance 0
+        Vts = dict([(x,0) for x in source_ids])
+        Ets = {}
+
+        related = source_ids
+        current_boundary = source_ids
+        for t in range(num_hops):
+            V = {}
+            for v in nx.node_boundary(self.simple_graph, current_boundary, all_concepts - related):
+                incoming_nodes = list(nx.node_boundary(self.simple_graph, [v], current_boundary))
+                V[v] = sum(
+                    self.simple_graph[u][v].get('weight', 1) 
+                    for u in incoming_nodes
+                )
+                Ets.update(dict([(v, dict([
+                    (u, self.get_relations(u, v))
+                    for u in incoming_nodes
+                ]))]))
+
+            # Select nodes that are 'most' connected
+            top_V = sorted(list(V.items()), key=lambda x: x[1], reverse=True)[:max_B]
+            new_boundary = [v[0] for v in top_V]
+
+            # Add nodes to Vts, with distance increased by 1
+            Vts.update(dict([(v, t+1) for v in new_boundary]))
+            related.update(new_boundary)
+            current_boundary = new_boundary
+
+        concept_ids = [id for id in Vts.keys()]
+        labels = [int(c in target_ids) for c in concept_ids]
+        distances = [d for d in Vts.values()]
+        triples = [
+            (u, rels, v)
+            for v, incoming_relations in Ets.items()
+            for u, rels in incoming_relations.items()
+            if (u in concept_ids) and (v in concept_ids)
+        ]
+
+        return {"concept_ids":concept_ids, "labels":labels, "distances":distances, "triples":triples}
 
 
     def find_neighbours(self, source_concepts, target_concepts, num_hops, max_B=100):
@@ -191,7 +244,7 @@ class ConceptGraph(nx.Graph):
                             V[n] = self.simple_graph[s][n]['weight']
                         else:                       # if already reached, increase weight of node
                             V[n] += self.simple_graph[s][n]['weight'] 
-                    rels = self.get_edge(s, n)      # list of relation types between s and n in the full graph
+                    rels = self.get_relations(s, n)      # list of relation types between s and n in the full graph
                     if len(rels) > 0:
                         if n not in Ets:
                             Ets[n] = {s: rels}  
@@ -227,7 +280,7 @@ class ConceptGraph(nx.Graph):
         # triples_text = [(self.id2concept[u], [self.id2relation[r] for r in rels], self.id2concept[v]) for (u, rels, v) in triples]
         # logging.debug("\tReturn {} concepts and {} triples".format(len(concepts), len(triples)))
 
-        return {"concept_ids":concept_ids, "labels":labels, "distances":distances, "triples":triples}, sum(labels), len(concept_ids)
+        return {"concept_ids":concept_ids, "labels":labels, "distances":distances, "triples":triples}
 
 
     def filter_directed_triple(self, related_concepts, max_concepts=64, max_triples=256, max_neighbors=8):
@@ -237,6 +290,7 @@ class ConceptGraph(nx.Graph):
         distances = related_concepts['distances']
         triples = related_concepts['triples']
 
+        # Construct triple_dict, with per tail-node, all the triples that are connected
         triple_dict = {}
         for triple in triples:
             head, _, tail = triple
@@ -278,7 +332,7 @@ class ConceptGraph(nx.Graph):
             len(shortest_paths), len(ground_truth_triples_set), len(triple_labels), sum(triple_labels)
         ))
         logging.debug("Examples: {}".format([
-            " + ".join([self.id2concept[n] for n in p])
+            " - ".join([self.id2concept[n] for n in p])
             for p in shortest_paths
         ][:5]))
 
