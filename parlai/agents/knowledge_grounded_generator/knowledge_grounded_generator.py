@@ -160,10 +160,17 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             help="Freeze the weights of the GPT2 language model during training."
         )
         group.add_argument(
-            "--allow-targets-in-source",
+            "--overlapping-concepts",
+            type=str,
+            choices=["excl-tgt-in-src", "excl-src-in-tgt", "keep-src-and-tgt"],
+            default="excl-src-in-tgt",
+            help="How to ensure disjoint sets of concepts."
+        )
+        group.add_argument(
+            "--block-src",
             type=bool,
-            default=False,
-            help="If true, allows repetition of concepts in source; otherwise stimulates generation of new related concepts."
+            default=True,
+            help="Blocking source concepts in reasoning stimulates generation of new related concepts."
         )
         return parser
 
@@ -174,7 +181,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         self.num_hops = opt['num_hops']
         self.max_concepts = opt['max_concepts']
         self.max_triples = opt['max_triples']
-        self.allow_targets_in_source = opt['allow_targets_in_source']
+        self.overlapping_concepts = opt['overlapping_concepts']
         if shared == None:
             self.model_vocab = self.dict.keys()
             self._cache_sorted_dict_ind = sorted(self.dict.ind2tok.keys())
@@ -280,7 +287,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         logging.debug("Labels: {}".format(labels))
 
         # Match with concepts in knowledge graph
-        concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels), self.allow_targets_in_source)
+        concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels), self.overlapping_concepts)
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
         related_concepts = self.kg.find_neighbours_nx(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)
         time_related = timer.time()

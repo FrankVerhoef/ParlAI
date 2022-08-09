@@ -151,18 +151,23 @@ class ConceptGraph(nx.Graph):
         return res
 
 
-    def match_mentioned_concepts(self, sent, answer, allow_targets_in_source=False):
+    def match_mentioned_concepts(self, sent, answer, overlapping_concepts):
         """
             Returns a dict with sentence from source, sentence from answer and the concepts
             from those sentences
         """
 
-        question_concepts = self.hard_ground(sent)
-        if not allow_targets_in_source:
-            all_concepts = self.hard_ground(sent + ' ' + answer)
-            answer_concepts = all_concepts - question_concepts
+        if overlapping_concepts == "keep-src-and-tgt":
+            question_concepts = self.hard_ground(sent)
+            answer_concepts = self.hard_ground(answer)            
         else:
-            answer_concepts = self.hard_ground(answer)
+            all_concepts = self.hard_ground(sent + ' ' + answer)
+            if overlapping_concepts == "excl-tgt-in-src":
+                answer_concepts = self.hard_ground(answer)
+                question_concepts = all_concepts - answer_concepts
+            else: # excl-src-in-tgt
+                question_concepts = self.hard_ground(sent)
+                answer_concepts = all_concepts - question_concepts
         return {"sent": sent, "ans": answer, "qc": list(question_concepts), "ac": list(answer_concepts)}
 
 

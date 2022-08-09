@@ -135,7 +135,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         self.num_hops = opt['num_hops']
         self.gamma = opt['gamma']
         self.aggregate_method = opt['aggregate_method']
-        self.allow_targets_in_source = opt['allow_targets_in_source']
+        self.block_src = opt['block_src']
         self.triple_encoder = TripleEncoder(self.gpt2model.transformer.wte, self.num_hops)
         self.triple_linear = nn.Linear(opt['embedding_size'] * 3, opt['embedding_size'], bias=False)
 
@@ -291,7 +291,7 @@ class KnowledgeGroundedDecoder(nn.Module):
             concept_scores.append(out)
              
         total_concept_score = final_mask
-        if not self.allow_targets_in_source:
+        if self.block_src:
             total_concept_score *= -1e5     # Punish start-nodes by assigning large negative value
         for score in concept_scores[1:]:
             total_concept_score += score
