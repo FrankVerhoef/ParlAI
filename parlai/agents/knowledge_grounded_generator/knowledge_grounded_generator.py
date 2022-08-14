@@ -291,8 +291,13 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         logging.debug("Concepts: {} + {}".format(concepts['qc'], concepts['ac']))
         related_concepts = self.kg.find_neighbours_nx(concepts['qc'], concepts['ac'], num_hops=self.num_hops, max_B=100)
         time_related = timer.time()
+        num_triples = len(related_concepts['triples'])
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
         time_filter = timer.time()
+        self.global_metrics.add(
+            'triple_trunc', 
+            AverageMetric((num_triples - len(filtered_data['head_idx'])) / max(num_triples,1), 1)
+        )
 
         # Construct list with gate_labels
         target_concept_ids = [self.dict.txt2vec(' ' + c)[0] for c in concepts['ac']]

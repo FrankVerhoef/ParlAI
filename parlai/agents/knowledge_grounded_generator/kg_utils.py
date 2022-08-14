@@ -294,6 +294,7 @@ class ConceptGraph(nx.Graph):
         labels = related_concepts['labels']
         distances = related_concepts['distances']
         triples = related_concepts['triples']
+        num_tails = len(concept_ids) - sum([int(d == 0) for d in distances])
 
         # Construct triple_dict, with per tail-node, all the triples that are connected
         triple_dict = {}
@@ -305,8 +306,13 @@ class ConceptGraph(nx.Graph):
                 if tail not in triple_dict:
                     triple_dict[tail] = [triple]
                 else:
-                    if len(triple_dict[tail]) < max_neighbors:
-                        triple_dict[tail].append(triple)
+                    triple_dict[tail].append(triple)
+                    # if len(triple_dict[tail]) < max_neighbors:
+                    #     triple_dict[tail].append(triple)
+                    # else:
+                    #     triple_not_added += 1
+            # else:
+            #     print("distance tail<head !")
 
         targets = [id for id, l in zip(concept_ids, labels) if l == 1]
         sources = [id for id, d in zip(concept_ids, distances) if d == 0]
@@ -322,16 +328,30 @@ class ConceptGraph(nx.Graph):
 
         heads, tails, relations, triple_labels = [], [], [], []
         triple_count = 0
-        for triple_list in triple_dict.values():
-            for (head, rels, tail) in triple_list:
-                max_reached = triple_count >= max_triples
-                if max_reached: break
+        triple_dict_sorted = sorted(list(triple_dict.values()), key=lambda x: len(x), reverse=False)
+        for i, triple_list in enumerate(triple_dict_sorted):
+            max_neighbors = (max_triples - triple_count) // (num_tails - i)
+            for (head, rels, tail) in triple_list[:max_neighbors]:
+                # max_reached = triple_count >= max_triples
+                # if max_reached: break
                 heads.append(concept_ids.index(head))
                 tails.append(concept_ids.index(tail))
                 relations.append(rels[0])   # Keep only one relation
                 triple_labels.append(int((tail, head) in ground_truth_triples_set))
                 triple_count += 1
-            if max_reached: break
+            # if max_reached: break
+
+        # connected_tails = set([
+        #     v
+        #     for (u, rels, v) in triples
+        #     if concept_ids.index(v) in tails
+        # ])
+        # all_tails = set([
+        #     v
+        #     for (u, rels, v) in triples
+        # ])
+        # print("Triples not added: ", len(triples) - len(heads))
+        # print("tails {}, connected {}, orphan {}".format(len(all_tails), len(connected_tails), len(all_tails - connected_tails)))
 
         logging.debug("Connecting paths: {} with {} triples; kept {} triples with {} targets".format(
             len(shortest_paths), len(ground_truth_triples_set), len(triple_labels), sum(triple_labels)
