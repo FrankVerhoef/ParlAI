@@ -295,7 +295,16 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
         # Match input text and label with concepts in knowledge graph
         concepts = self.kg.match_mentioned_concepts(text, ' '.join(labels), self.overlapping_concepts)
-        logging.debug("Concepts: {} + {}".format(concepts['source_concepts'], concepts['target_concepts']))
+        logging.debug("Concepts: {}:{} + {}:{}".format(
+            len(concepts['source_concepts']), 
+            concepts['source_concepts'], 
+            len(concepts['target_concepts']), 
+            concepts['target_concepts'])
+        )
+        if len(concepts['source_concepts']) > self.max_concepts:
+            logging.warning("Number of source concepts {} is larger than max-concepts {}. If this happens frequently, consider to increase max-concepts".format(
+                len(concepts['source_concepts']), self.max_concepts)
+            )
 
         # Find related concepts and connecting triples
         related_concepts = self.kg.find_neighbours_nx(
@@ -304,7 +313,10 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             num_hops=self.num_hops, 
             max_B=self.max_branch
         )
+        num_concepts = len(related_concepts['concept_ids'])
+        num_triples = len(related_concepts['triples'])
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
+        del related_concepts
 
         # logging.debug("Related concepts {}: {}".format(
         #     len(filtered_data['concept_ids']), 
@@ -341,7 +353,10 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation['triple_labels'] = torch.LongTensor(filtered_data['triple_labels'])
 
         # Add metrics about observation
-        num_triples = len(related_concepts['triples'])
+        self.global_metrics.add(
+            'concept_trunc', 
+            AverageMetric((num_concepts - len(filtered_data['concept_ids'])) / max(num_concepts,1), 1)
+        )
         self.global_metrics.add(
             'triple_trunc', 
             AverageMetric((num_triples - len(filtered_data['head_idx'])) / max(num_triples,1), 1)

@@ -235,9 +235,6 @@ class ConceptGraph(nx.Graph):
 
         num_concepts = len(related_concepts['concept_ids'])
         if num_concepts > max_concepts:
-            logging.warning("Number of connected concepts {} is larger than max-concepts {}. If this happens frequently, consider to increase max-concepts".format(
-                num_concepts, max_concepts
-            ))
             num_concepts = max_concepts
         concept_ids = related_concepts['concept_ids'][:max_concepts]
         labels = related_concepts['labels'][:max_concepts]
@@ -279,9 +276,6 @@ class ConceptGraph(nx.Graph):
         triple_lists_sorted = sorted(list(triple_dict.values()), key=lambda x: len(x), reverse=False)
         num_triples = sum([len(triple_list) for triple_list in triple_lists_sorted])
         if num_triples > max_triples:
-            logging.warning("Number of triples {} is larger than max-triples {}. If this happens frequently, consider to increase max-triples".format(
-                num_triples, max_triples
-            ))
             num_triples = max_triples
 
         # Loop through triple lists. This can never be more than max_triples; rest is truncated
@@ -303,12 +297,17 @@ class ConceptGraph(nx.Graph):
             for p in shortest_paths
         ][:5]))
 
-        related_concepts['head_idx'] = heads
-        related_concepts['tail_idx'] = tails
-        related_concepts['relation_ids'] = relations
-        related_concepts['triple_labels'] = triple_labels
+        filtered_concepts = {
+            "concept_ids": concept_ids,
+            "labels": labels,
+            "distances": distances,
+            "head_idx": heads,
+            "tail_idx": tails,
+            "relation_ids": relations,
+            "triple_labels": triple_labels
+        }
             
-        return related_concepts
+        return filtered_concepts
 
 
     def formatted_concepts_string(self, related_concepts, max):
