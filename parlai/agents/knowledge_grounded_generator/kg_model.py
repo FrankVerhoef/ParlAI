@@ -7,7 +7,6 @@ from torch_scatter import scatter_max, scatter_mean, scatter_add
 from parlai.agents.hugging_face.gpt2 import GPT2Decoder
 from parlai.core.torch_generator_agent import TorchGeneratorModel
 import parlai.utils.logging as logging
-import time as timer
 
 class Identity(nn.Module):
     def forward(self, *batch):
@@ -35,19 +34,17 @@ class TripleEncoder(nn.Module):
         """
         Encodes knowledge triples
         Tensor sizes are:
-            B, M: for concept_ids
+            B, Mc: for concept_ids
             B, Mt: for relations, head_ids, tail_ids
             B, Mt, 3 x E: for output (triple representation)
 
             B = batch size
-            M = number of related concepts (can vary per batch)
+            Mc = number of related concepts (can vary per batch)
             Mt = number of related triples (can vary per batch)
             E = embedding dimension for concepts (is same as embedding dim for relations)
         """
         logging.debug("Forward TripleEncoder")
         logging.debug("\tEncoding {} concepts and {} relations".format(concept_ids.shape, relations.shape))
-
-        start = timer.time()
 
         # Embed concepts and relations
         concept_repr = self.concept_embd(concept_ids)
@@ -69,19 +66,19 @@ class TripleEncoder(nn.Module):
         triple_repr = torch.cat((head_repr, rel_repr, tail_repr), dim=-1)
 
         logging.debug("\tShape of encoded triples: {}".format(triple_repr.shape))
-        logging.debug("\ttime TripleEncoder: {}".format(timer.time() - start))
+
         return triple_repr
 
 
     def comp_gcn(self, concept_repr, rel_repr, head_ids, tail_ids, triple_labels, layer_number=2):
         '''
-        concept_repr: B x M x E  (M=number of related concepts)
+        concept_repr: B x Mc x E  (Mc=number of related concepts)
         rel_repr: B x Mt x E (Mt=number of triples)
         '''
 
         B = head_ids.size(0)
         Mt = head_ids.size(1)
-        M = concept_repr.size(1)
+        Mc = concept_repr.size(1)
         E = concept_repr.size(2)
 
         concept_hidden, relation_hidden = concept_repr, rel_repr
@@ -90,15 +87,13 @@ class TripleEncoder(nn.Module):
             # Initialise update_node for GCN calculation
             update_node = torch.zeros_like(concept_repr).to(concept_repr.device).float()
             count = torch.ones_like(head_ids).to(head_ids.device).masked_fill_(triple_labels == -1, 0).float()
-            # count = torch.ones_like(head_ids).to(head_ids.device).float()
-            count_out = torch.zeros(B, M).to(head_ids.device).float()
+            count_out = torch.zeros(B, Mc).to(head_ids.device).float()
 
             # Add the concept representations of the heads to node 'positions' of tails, subtract relation representation
             o = concept_hidden.gather(1, head_ids.unsqueeze(2).expand(B, Mt, E))
             o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
             scatter_add(o, tail_ids, dim=1, out=update_node)
             scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), tail_ids, dim=1, out=update_node)
-            # scatter_add(-relation_hidden, tail_ids, dim=1, out=update_node)
             scatter_add(count, tail_ids, dim=1, out=count_out)
 
             # Add the concept representations of the tails to node 'position' of heads, subtract relation representation
@@ -106,7 +101,6 @@ class TripleEncoder(nn.Module):
             o = o.masked_fill(triple_labels.unsqueeze(2) == -1, 0)
             scatter_add(o, head_ids, dim=1, out=update_node)
             scatter_add(-relation_hidden.masked_fill(triple_labels.unsqueeze(2) == -1, 0), head_ids, dim=1, out=update_node)
-            # scatter_add(-relation_hidden, head_ids, dim=1, out=update_node)
             scatter_add(count, head_ids, dim=1, out=count_out)
 
             # Combine calculated update to form new node and relation representations
@@ -202,14 +196,11 @@ class KnowledgeGroundedDecoder(nn.Module):
 
         sigmoid = nn.Sigmoid()
         softmax = nn.Softmax(dim=-1)
-        start = timer.time()
 
         # Calculate probabilities according to language model
         hidden_states, gpt_states = self.gpt2model(decoder_input, input_ids, gpt_states)
         lm_logits = self.lm_head(hidden_states)
         lm_probs = softmax(lm_logits)
-        # logging.debug("Highest gpt2 index {}".format(torch.max(lm_probs, dim=-1)))
-        gpt_time = timer.time() - start
 
         # Combine hidden states with knowledge triples to calculate triple score
         triple_logits = torch.matmul(
@@ -222,9 +213,7 @@ class KnowledgeGroundedDecoder(nn.Module):
         # B x L x Mt
 
         # Aggregate probability to nodes
-        concept_scores = self.multi_hop(
-            triple_prob, kg_mem
-        )
+        concept_scores = self.multi_hop(triple_prob, kg_mem)
         concept_probs = softmax(concept_scores)
 
         # Calculate probability for concepts
@@ -238,12 +227,7 @@ class KnowledgeGroundedDecoder(nn.Module):
             gate = torch.ones((lm_probs.size(0), lm_probs.size(1) ,1), device=lm_probs.device) * self.fixed_gate_value
         else:
             gate = sigmoid(self.gate_linear(hidden_states))
-        kgg_time = timer.time() - gpt_time - start
-        # logging.debug("\ttime GPT: {}".format(gpt_time))
-        # logging.debug("\ttime KGG: {}".format(kgg_time))
-        # logging.debug("Highest concept index {}".format(torch.max(concept_probs_vocab, dim=-1)))
         probs = gate * concept_probs_vocab + (1 - gate) * lm_probs
-        # logging.debug("Highest overall index {}, with gate {}".format(torch.max(probs, dim=-1), gate))
         is_concept = (torch.argmax(probs, dim=-1) != torch.argmax(lm_probs, dim=-1)).long()
 
         return (probs, gate, triple_prob, is_concept, lm_probs, concept_probs_vocab), gpt_states
@@ -252,9 +236,9 @@ class KnowledgeGroundedDecoder(nn.Module):
     def multi_hop(self, triple_prob, kg_mem):
         '''
         triple_prob: B x L x Mt
-        distance: B x M
+        distance: B x Mc
         head, tail: B x Mt
-        concept_label: B x M
+        concept_label: B x Mc
         triple_label: B x Mt
         '''
         distance = kg_mem["distances"]
@@ -279,8 +263,6 @@ class KnowledgeGroundedDecoder(nn.Module):
             triple_head_score.masked_fill_((kg_mem["triple_labels"] == -1).unsqueeze(1), 0)
             
             # Aggregate scores to tail nodes
-            # avg: score(tail) = avg_{head \in N(tail)} gamma * score(head) + p(head -> tail) 
-            # max: score(tail) = max_{head \in N(tail)} gamma * score(head) + p(head -> tail)
             update_value = triple_head_score * self.gamma + triple_prob
             out = torch.zeros_like(node_score).to(node_score.device).float()
             if self.aggregate_method == "max":
@@ -295,7 +277,7 @@ class KnowledgeGroundedDecoder(nn.Module):
             total_concept_score *= -1e5     # Punish start-nodes by assigning large negative value
         for score in concept_scores[1:]:
             total_concept_score += score
-        # B x L x M
+        # B x L x Mc
 
         return total_concept_score
 

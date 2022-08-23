@@ -11,6 +11,9 @@ TAIL=2
 
 nlp = spacy.load('en_core_web_sm', disable=['parser', 'lemmatizer'])
 
+# Blacklist contains concepts NOT to include.
+# In this case, it is the list with auxiliary verbs and the word 'persona' 
+# which is used as identifier in the input text for the persona descriptions.
 blacklist = set([
     "persona", 
     "be", "am", "is", "are", "was", "were", "being", "been",
@@ -100,7 +103,6 @@ class ConceptGraph(nx.Graph):
     def load_knowledge_graph(self, graph_path):
         """
             Load the graph and store it, as well as a simpler version of the graph.
-            In this graph multiple edges between the same nodes are combined (and weight added)
         """
         
         cpnet = pickle.load(open(graph_path, "rb"))
@@ -109,7 +111,10 @@ class ConceptGraph(nx.Graph):
 
 
     def build_reduced_graph(self, concepts_subset):
-
+        """
+            Construct a subgraph with only the nodes in the given concepts_subset.
+            In this graph multiple edges between the same nodes are combined (and weight added)
+        """
         matching_ids = [self.concept2id[c] for c in concepts_subset if c in self.concept2id.keys()]
         cpnet_simple = nx.Graph()
 
@@ -137,38 +142,33 @@ class ConceptGraph(nx.Graph):
 
         sent = sent.lower()
         doc = nlp(sent)
-        res = set()
-
-        # logging.debug("POS tags: {}".format(
-        #     ', '.join(['({}, {})'.format(token.text, token.pos_) for token in doc])
-        # ))
+        result = set()
 
         for token in doc:
             if token.pos_ in ['NOUN', 'PROPN', 'VERB']:
                 if token.text in self.simple_vocab:
-                    res.add(token.text)
+                    result.add(token.text)
 
-        return res
+        return result
 
 
-    def match_mentioned_concepts(self, sent, answer, overlapping_concepts):
+    def match_mentioned_concepts(self, source, target, overlapping_concepts):
         """
-            Returns a dict with sentence from source, sentence from answer and the concepts
-            from those sentences
+            Returns a dict with concepts from the input sentence and the target sentence
         """
 
         if overlapping_concepts == "keep-src-and-tgt":
-            question_concepts = self.hard_ground(sent)
-            answer_concepts = self.hard_ground(answer)            
+            source_concepts = self.hard_ground(source)
+            target_concepts = self.hard_ground(target)            
         else:
-            all_concepts = self.hard_ground(sent + ' ' + answer)
+            combined_concepts = self.hard_ground(source + ' ' + target)
             if overlapping_concepts == "excl-tgt-in-src":
-                answer_concepts = self.hard_ground(answer)
-                question_concepts = all_concepts - answer_concepts
+                target_concepts = self.hard_ground(target)
+                source_concepts = combined_concepts - target_concepts
             else: # excl-src-in-tgt
-                question_concepts = self.hard_ground(sent)
-                answer_concepts = all_concepts - question_concepts
-        return {"sent": sent, "ans": answer, "qc": list(question_concepts), "ac": list(answer_concepts)}
+                source_concepts = self.hard_ground(source)
+                target_concepts = combined_concepts - source_concepts
+        return {"source_concepts": list(source_concepts), "target_concepts": list(target_concepts)}
 
 
     def get_relations(self, src_concept, tgt_concept):
@@ -178,6 +178,7 @@ class ConceptGraph(nx.Graph):
             return list(set([rel_list[item]["rel"] for item in rel_list]))
         except:
             return []
+
 
     def find_neighbours_nx(self, source_concepts, target_concepts, num_hops, max_B=100):
         """
@@ -230,89 +231,34 @@ class ConceptGraph(nx.Graph):
         return {"concept_ids":concept_ids, "labels":labels, "distances":distances, "triples":triples}
 
 
-    def find_neighbours(self, source_concepts, target_concepts, num_hops, max_B=100):
-        """
-            Find neighboring concepts within num_hops and the connecting triples
-        """
-        # logging.debug("Finding neighbours for {} and {}".format(source_concepts, target_concepts))
-        source = [self.concept2id[s_cpt] for s_cpt in source_concepts]  # id's in knowledge graph of the source concepts 
-        start = source                              # start init contains id's of source concepts
-        Vts = dict([(x,0) for x in start])          # Vts init contains id's of concepts in knowledge graph, with distance 0
-        Ets = {}
-        for t in range(num_hops):
-            V = {}
-            for s in start:
-                # logging.debug("Check neighbors of: {}".format(self.id2concept[s]))
-                for n in self.simple_graph[s]:      # loops through the neighbors
-                    if n not in Vts:
-                        if n not in V:              # if not yet reached, add node to 'V' with weight
-                            V[n] = self.simple_graph[s][n]['weight']
-                        else:                       # if already reached, increase weight of node
-                            V[n] += self.simple_graph[s][n]['weight'] 
-                    rels = self.get_relations(s, n)      # list of relation types between s and n in the full graph
-                    if len(rels) > 0:
-                        if n not in Ets:
-                            Ets[n] = {s: rels}  
-                        else:
-                            Ets[n].update({s: rels})
-                            
-            V = list(V.items())                     # convert from dict to list
-            count_V = sorted(V, key=lambda x: x[1], reverse=True)[:max_B] # select concepts with most weight
-            start = [x[0] for x in count_V]         # update start to the newly visited nodes
-            
-            # Add nodes to Vts, with distance increased by 1
-            Vts.update(dict([(x, t+1) for x in start]))
-        
-        concept_ids = [id for id in Vts.keys()]
-        distances = [d for d in Vts.values()]
+    def filter_directed_triple(self, related_concepts, max_concepts=64, max_triples=256):
 
-        # Construct tuples with triples
-        triples = []
-        for v, N in Ets.items():
-            if v in concept_ids:
-                for u, rels in N.items():
-                    if u in concept_ids:
-                        triples.append((u, rels, v))
-
-        # id's of nodes in the concept graph of target concepts
-        target_ids = [self.concept2id[t_cpt] for t_cpt in target_concepts]   
-
-        # Construct a list with labels; if the T-hop concept appears in target, then corresponding label is 1
-        labels = [int(c in target_ids) for c in concept_ids]
-        
-        # Translate concept id's and relation id's back to text for interpretability
-        # concepts = [self.id2concept[c] for c in concept_ids] 
-        # triples_text = [(self.id2concept[u], [self.id2relation[r] for r in rels], self.id2concept[v]) for (u, rels, v) in triples]
-        # logging.debug("\tReturn {} concepts and {} triples".format(len(concepts), len(triples)))
-
-        return {"concept_ids":concept_ids, "labels":labels, "distances":distances, "triples":triples}
-
-
-    def filter_directed_triple(self, related_concepts, max_concepts=64, max_triples=256, max_neighbors=8):
-
-        concept_ids = related_concepts['concept_ids']
-        labels = related_concepts['labels']
-        distances = related_concepts['distances']
+        num_concepts = len(related_concepts['concept_ids'])
+        if num_concepts > max_concepts:
+            logging.warning("Number of connected concepts {} larger than max-concepts {}. If this happens frequently, consider to increase max-concepts".format(
+                num_concepts, max_concepts
+            ))
+            num_concepts = max_concepts
+        concept_ids = related_concepts['concept_ids'][:max_concepts]
+        labels = related_concepts['labels'][:max_concepts]
+        distances = related_concepts['distances'][:max_concepts]
         triples = related_concepts['triples']
-        num_tails = len(concept_ids) - sum([int(d == 0) for d in distances])
 
         # Construct triple_dict, with per tail-node, all the triples that are connected
         triple_dict = {}
         for triple in triples:
             head, _, tail = triple
-            head_index = concept_ids.index(head)
-            tail_index = concept_ids.index(tail)
-            if distances[head_index] <= distances[tail_index]:
-                if tail not in triple_dict:
-                    triple_dict[tail] = [triple]
-                else:
-                    triple_dict[tail].append(triple)
-                    # if len(triple_dict[tail]) < max_neighbors:
-                    #     triple_dict[tail].append(triple)
-                    # else:
-                    #     triple_not_added += 1
-            # else:
-            #     print("distance tail<head !")
+            try:
+                head_index = concept_ids.index(head)
+                tail_index = concept_ids.index(tail)
+                if distances[head_index] <= distances[tail_index]:
+                    if tail not in triple_dict:
+                        triple_dict[tail] = [triple]
+                    else:
+                        triple_dict[tail].append(triple)
+            except ValueError:
+                # If head or tail not found in concept_ids (because of truncation), just pass
+                pass
 
         targets = [id for id, l in zip(concept_ids, labels) if l == 1]
         sources = [id for id, d in zip(concept_ids, distances) if d == 0]
@@ -328,30 +274,26 @@ class ConceptGraph(nx.Graph):
 
         heads, tails, relations, triple_labels = [], [], [], []
         triple_count = 0
-        triple_dict_sorted = sorted(list(triple_dict.values()), key=lambda x: len(x), reverse=False)
-        for i, triple_list in enumerate(triple_dict_sorted):
-            max_neighbors = (max_triples - triple_count) // (num_tails - i)
+
+        # Sort triple lists, one list per tail node
+        triple_lists_sorted = sorted(list(triple_dict.values()), key=lambda x: len(x), reverse=False)
+        num_triples = sum([len(triple_list) for triple_list in triple_lists_sorted])
+        if num_triples > max_triples:
+            logging.warning("Number of connected concepts {} larger than max-triples {}. If this happens frequently, consider to increase max-triples".format(
+                num_triples, max_triples
+            ))
+            num_triples = max_triples
+
+        # Loop through triple lists. This can never be more than max_triples; rest is truncated
+        num_triple_lists = min(max_triples, len(triple_lists_sorted))
+        for i, triple_list in enumerate(triple_lists_sorted[:num_triple_lists]):
+            max_neighbors = (max_triples - triple_count) // (num_triple_lists - i)
             for (head, rels, tail) in triple_list[:max_neighbors]:
-                # max_reached = triple_count >= max_triples
-                # if max_reached: break
                 heads.append(concept_ids.index(head))
                 tails.append(concept_ids.index(tail))
                 relations.append(rels[0])   # Keep only one relation
                 triple_labels.append(int((tail, head) in ground_truth_triples_set))
                 triple_count += 1
-            # if max_reached: break
-
-        # connected_tails = set([
-        #     v
-        #     for (u, rels, v) in triples
-        #     if concept_ids.index(v) in tails
-        # ])
-        # all_tails = set([
-        #     v
-        #     for (u, rels, v) in triples
-        # ])
-        # print("Triples not added: ", len(triples) - len(heads))
-        # print("tails {}, connected {}, orphan {}".format(len(all_tails), len(connected_tails), len(all_tails - connected_tails)))
 
         logging.debug("Connecting paths: {} with {} triples; kept {} triples with {} targets".format(
             len(shortest_paths), len(ground_truth_triples_set), len(triple_labels), sum(triple_labels)
@@ -365,7 +307,6 @@ class ConceptGraph(nx.Graph):
         related_concepts['tail_idx'] = tails
         related_concepts['relation_ids'] = relations
         related_concepts['triple_labels'] = triple_labels
-        related_concepts.pop('triples')
             
         return related_concepts
 
