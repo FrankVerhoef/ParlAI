@@ -235,7 +235,7 @@ class ConceptGraph(nx.Graph):
 
         num_concepts = len(related_concepts['concept_ids'])
         if num_concepts > max_concepts:
-            logging.warning("Number of connected concepts {} larger than max-concepts {}. If this happens frequently, consider to increase max-concepts".format(
+            logging.warning("Number of connected concepts {} is larger than max-concepts {}. If this happens frequently, consider to increase max-concepts".format(
                 num_concepts, max_concepts
             ))
             num_concepts = max_concepts
@@ -279,7 +279,7 @@ class ConceptGraph(nx.Graph):
         triple_lists_sorted = sorted(list(triple_dict.values()), key=lambda x: len(x), reverse=False)
         num_triples = sum([len(triple_list) for triple_list in triple_lists_sorted])
         if num_triples > max_triples:
-            logging.warning("Number of connected concepts {} larger than max-triples {}. If this happens frequently, consider to increase max-triples".format(
+            logging.warning("Number of triples {} is larger than max-triples {}. If this happens frequently, consider to increase max-triples".format(
                 num_triples, max_triples
             ))
             num_triples = max_triples

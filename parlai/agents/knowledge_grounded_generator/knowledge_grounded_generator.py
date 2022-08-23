@@ -113,6 +113,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             help="Number of hops in the graph to look for related concepts."
         )
         group.add_argument(
+            "--max-branch",
+            type=int,
+            default=64,
+            help="Maximum number of related concepts to add per hop."
+        )
+        group.add_argument(
             "--max-concepts",
             type=int,
             default=256,
@@ -181,6 +187,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         super().__init__(opt, shared)
 
         self.num_hops = opt['num_hops']
+        self.max_branch = opt['max_branch']
         self.max_concepts = opt['max_concepts']
         self.max_triples = opt['max_triples']
         self.overlapping_concepts = opt['overlapping_concepts']
@@ -291,7 +298,12 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         logging.debug("Concepts: {} + {}".format(concepts['source_concepts'], concepts['target_concepts']))
 
         # Find related concepts and connecting triples
-        related_concepts = self.kg.find_neighbours_nx(concepts['source_concepts'], concepts['target_concepts'], num_hops=self.num_hops, max_B=100)
+        related_concepts = self.kg.find_neighbours_nx(
+            concepts['source_concepts'], 
+            concepts['target_concepts'], 
+            num_hops=self.num_hops, 
+            max_B=self.max_branch
+        )
         filtered_data = self.kg.filter_directed_triple(related_concepts, max_concepts=self.max_concepts, max_triples=self.max_triples)
 
         # logging.debug("Related concepts {}: {}".format(
