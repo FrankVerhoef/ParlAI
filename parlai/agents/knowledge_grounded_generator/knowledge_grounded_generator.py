@@ -10,7 +10,7 @@ from parlai.core.metrics import AverageMetric
 from parlai.core.torch_agent import Output
 from parlai.core.torch_generator_agent import PPLMetric, GreedySearch, _PathSelection, _HypothesisTail
 
-from parlai.agents.knowledge_grounded_generator.kg_utils import NOCONCEPT_TOKEN, NORELATION_TOKEN, ConceptGraph, blacklist
+from parlai.agents.knowledge_grounded_generator.kg_utils import NORELATION_TOKEN, ConceptGraph, blacklist
 from parlai.agents.knowledge_grounded_generator.kg_model import KnowledgeGroundedModel
 import parlai.utils.logging as logging
 

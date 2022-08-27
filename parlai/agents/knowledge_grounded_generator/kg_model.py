@@ -21,7 +21,7 @@ class TripleEncoder(nn.Module):
         E = embedding.weight.shape[-1]
         self.num_hops = num_hops
         self.concept_embd = embedding
-        self.relation_embd = nn.Embedding(40, E)
+        self.relation_embd = nn.Embedding(69, E) # 2x34+1, for 2 x #relation types in ConceptNet5 + NORELATION token
         self.W_s = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)]) 
         self.W_n = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)]) 
         self.W_r = nn.ModuleList([nn.Linear(E, E, bias=False) for _ in range(self.num_hops)])

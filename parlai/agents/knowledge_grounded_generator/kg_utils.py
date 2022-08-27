@@ -31,27 +31,6 @@ blacklist = set([
 ])
 
 
-def read_csv(data_path="train/source.csv"):
-    data = []
-    with open(data_path, 'r') as f:
-        reader = csv.reader(f, delimiter=',')
-        for i, row in enumerate(reader):
-            data.append(' '.join(row[1:]))
-    return data
-
-def read_json(filename):
-    data = []
-    with open(filename, 'r') as f:
-        for line in f.readlines():
-            data.append(json.loads(line))
-    return data
-
-def save_json(data, filename):
-    with open(filename, 'w') as f:
-        for line in data:
-            json.dump(line, f)
-            f.write('\n')
-
 NOCONCEPT_TOKEN = '<NoConcept>'
 NORELATION_TOKEN = '<NoRelation>'
 
@@ -59,55 +38,27 @@ class ConceptGraph(nx.Graph):
 
     def __init__(self, path, concepts, relations, graph):
         super().__init__()
-        self.load_resources(path + concepts, path + relations)
         self.load_knowledge_graph(path + graph)
-
-
-    def load_resources(self, concepts, relations):
-
-        concept2id = {}
-        id2concept = {}
-        cpnet_vocab = []
-        with open(concepts, "r", encoding="utf8") as f:
-            for line in f.readlines():
-                w = line.strip()
-                concept2id[w] = len(concept2id)
-                id2concept[len(id2concept)] = w
-                cpnet_vocab.append(w)
-        concept2id[NOCONCEPT_TOKEN] = len(concept2id)
-        id2concept[len(id2concept)] = NOCONCEPT_TOKEN
-        self.concept2id = concept2id
-        self.id2concept = id2concept
-        self.vocab = set([c.replace("_", " ") for c in cpnet_vocab])
-        logging.debug("Loaded {} concepts".format(len(self.concept2id)))
-
-        id2relation = {}
-        relation2id = {}
-        with open(relations, "r", encoding="utf8") as f:
-            for w in f.readlines():
-                id2relation[len(id2relation)] = w.strip()
-                relation2id[w.strip()] = len(relation2id)
-        l = len(relation2id)
-        for i in range(len(relation2id)): 
-            reverse = 'reverse_' + id2relation[i]
-            id2relation[len(id2relation)] = reverse
-            relation2id[reverse] = len(relation2id)
-        id2relation[len(id2relation)] = NORELATION_TOKEN
-        relation2id[NORELATION_TOKEN] = len(relation2id)
-
-        self.id2relation = id2relation
-        self.relation2id = relation2id
-        logging.debug("Loaded {} relation types".format(len(relation2id)))
 
 
     def load_knowledge_graph(self, graph_path):
         """
-            Load the graph and store it, as well as a simpler version of the graph.
+            Load the graph and store it
         """
-        
-        cpnet = pickle.load(open(graph_path, "rb"))
-        self.graph = cpnet
-        logging.info("Loaded knowledge graph with {} nodes and {} edges".format(len(cpnet.nodes), len(cpnet.edges)))
+        kg = pickle.load(open(graph_path, "rb"))
+        self.graph = kg["graph"]
+        self.id2concept = kg["concepts"]
+        self.id2concept.append(NOCONCEPT_TOKEN)        # can be used as padding
+        self.concept2id = {cpt: i for i, cpt in enumerate(self.id2concept)}
+
+        self.id2relation = kg["relations"]
+        self.id2relation.extend(['*' + rel for rel in kg["relations"]])
+        self.id2relation.append(NORELATION_TOKEN)      # can be used as padding
+        self.relation2id = {rel: i for i, rel in enumerate(self.id2relation)}
+
+        logging.info("Loaded knowledge graph with {} concepts, {} relation types and {} edges".format(
+            len(self.graph.nodes), len(self.id2relation)-1, len(self.graph.edges)
+        ))
 
 
     def build_reduced_graph(self, concepts_subset):
