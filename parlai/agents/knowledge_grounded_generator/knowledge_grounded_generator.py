@@ -77,18 +77,6 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             help='dir for knowledge graph data'
         )
         group.add_argument(
-            '--concepts', 
-            type=str, 
-            default='concept.txt', 
-            help='file with concept vocab'
-        )
-        group.add_argument(
-            '--relations', 
-            type=str, 
-            default='relation.txt', 
-            help='file with relation names'
-        )
-        group.add_argument(
             '--dataset-concepts', 
             type=str, 
             default='total_concepts.txt', 
@@ -197,15 +185,13 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         if shared == None:
             self.model_vocab = self.dict.keys()
             self._cache_sorted_dict_ind = sorted(self.dict.ind2tok.keys())
-            self.kg = ConceptGraph(opt['kg_datadir'], opt['concepts'], opt['relations'], opt['kg'])
-            self.matched_concepts = self.match_dataset_concepts(opt['kg_datadir'] + opt['dataset_concepts'])
-            self.kg.build_reduced_graph(self.matched_concepts)
+            self.kg = ConceptGraph(opt['kg_datadir'], opt['kg'])
+            self.kg.build_reduced_graph(opt['kg_datadir'] + opt['dataset_concepts'])
             logging.info("Initialized KnowledgeGroundedGeneratorAgent")
         else:
             self.model_vocab = shared['model_vocab']
             self._cache_sorted_dict_ind = shared['cache_dict_ind'] 
             self.kg = shared['kg']
-            self.matched_concepts = shared['matched_concepts']
             logging.info("Initialized KnowledgeGroundedGeneratorAgent [shared]")
 
 
@@ -217,7 +203,6 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         shared['model_vocab'] = self.model_vocab
         shared['cache_dict_ind'] = self._cache_sorted_dict_ind
         shared['kg'] = self.kg
-        shared['matched_concepts'] = self.matched_concepts
 
         return shared
 
@@ -228,30 +213,18 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return model
 
 
-    def match_dataset_concepts(self, concepts_path):
+    def build_criterion(self):
         """
-        Returns the set of concepts that appear in both the dataset and in the knowledge graph, 
-        and are not on the blacklist
+        Construct and return the loss function.
+        Uses parameters alpha and beta to determine how much of gate loss (x alpha) and triple loss (x beta)
+        is added to the final loss
         """
-
-        # total_concepts is the set of concepts that appears in the dataset (train and validation dialogues)
-        with open(concepts_path, 'r') as f:
-            total_concepts = set([line[:-1] for line in f])
-
-        # graph_concepts is the list of concepts in the knowledge graph
-        graph_concepts = [self.kg.id2concept[id] for id in self.kg.graph.nodes]
-
-        # matched concepts is the dataset concepts, minus words on the blacklist (e.g. auxiliary verbs) 
-        # that also appear in the knowledge graph
-        matched_concepts = (total_concepts - blacklist).intersection(graph_concepts)
-
-        logging.info("Matched {} of {} dataset tokens with {} concepts in knowledgegraph".format(
-            len(matched_concepts), len(total_concepts), len(graph_concepts)
-        ))
-        return matched_concepts
+        return KG_loss(ignore_index=self.NULL_IDX, invalid=-1, alpha = self.opt['alpha'], beta = self.opt['beta'])
 
 
-    def build_vocab_map(self, concept_token_ids):
+    ###### 0. Act/Observe ######
+
+    def _build_vocab_map(self, concept_token_ids):
         """
         The vocab map and associated mask are a mapping between the GPT2 vocabulary and the KG concepts
         in the current observation.
@@ -276,13 +249,10 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         logging.debug('=== KGG AGENT - OBSERVE ===')
 
         observation = super().observe(observation)
+        if not 'full_text' in observation.keys():
+            return observation
 
-        if 'full_text' in observation.keys():
-            text = observation['full_text']
-        elif 'text' in observation.keys():
-            text = observation['text']
-        else:
-            text = ''
+        text = observation['full_text']
         logging.debug('Text:{}'.format(text))
 
         if 'labels' in observation.keys():
@@ -344,7 +314,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         observation['gate_labels'] = torch.LongTensor(gate_labels)
 
         # Info how to map concepts to vocab
-        observation['vocab_map'], observation['map_mask'] = self.build_vocab_map(concept_token_ids)
+        observation['vocab_map'], observation['map_mask'] = self._build_vocab_map(concept_token_ids)
 
         # Info about relations to related concepts
         observation['relation_ids'] = torch.LongTensor(filtered_data['relation_ids'])
@@ -372,6 +342,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
 
         return observation
 
+    ###### 1. Model Inputs ######
 
     def batchify(self, obs_batch, sort=False):
         batch = super().batchify(obs_batch, sort=sort)
@@ -438,6 +409,8 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             batch.map_mask
         )    
 
+
+    ###### 2. Compute Loss ######
 
     def compute_loss(self, batch, return_output=False):
         """
@@ -523,14 +496,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
         return list(zip(tokens_as_txt, tokens_metadata))
 
 
-    def build_criterion(self):
-        """
-        Construct and return the loss function.
-        Uses parameters alpha and beta to determine how much of gate loss (x alpha) and triple loss (x beta)
-        is added to the final loss
-        """
-        return KG_loss(ignore_index=self.NULL_IDX, invalid=-1, alpha = self.opt['alpha'], beta = self.opt['beta'])
-
+    ###### 3. Train and Eval ######
 
     def eval_step(self, batch):
         """
@@ -636,6 +602,7 @@ class KnowledgeGroundedGeneratorAgent(Gpt2Agent):
             
         return retval
 
+    ###### 4. Generate ######
 
     def _generate(self, batch, beam_size, max_ts, prefix_tokens = None):
         """

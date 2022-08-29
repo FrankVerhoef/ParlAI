@@ -36,7 +36,7 @@ NORELATION_TOKEN = '<NoRelation>'
 
 class ConceptGraph(nx.Graph):
 
-    def __init__(self, path, concepts, relations, graph):
+    def __init__(self, path, graph):
         super().__init__()
         self.load_knowledge_graph(path + graph)
 
@@ -61,15 +61,23 @@ class ConceptGraph(nx.Graph):
         ))
 
 
-    def build_reduced_graph(self, concepts_subset):
+    def build_reduced_graph(self, concepts_path):
         """
             Construct a subgraph with only the nodes in the given concepts_subset.
             In this graph multiple edges between the same nodes are combined (and weight added)
         """
-        matching_ids = [self.concept2id[c] for c in concepts_subset if c in self.concept2id.keys()]
-        cpnet_simple = nx.Graph()
+        # dataset_concepts is the set of concepts that appears in the dataset (train and validation dialogues)
+        with open(concepts_path, 'r') as f:
+            dataset_concepts = set([line[:-1] for line in f])
 
-        for u, v, data in nx.subgraph(self.graph, matching_ids).edges(data=True):
+        # concepts_subset is the dataset concepts, minus words on the blacklist (e.g. auxiliary verbs) 
+        # that also appear in the knowledge graph
+        concepts_subset = (dataset_concepts - blacklist).intersection(self.id2concept)
+        concepts_subset_ids = [self.concept2id[c] for c in concepts_subset if c in self.concept2id.keys()]
+
+        # Create subgraph with only concepts that apprar in the dataset
+        cpnet_simple = nx.Graph()
+        for u, v, data in nx.subgraph(self.graph, concepts_subset_ids).edges(data=True):
             w = data['weight'] if 'weight' in data else 1.0
             if cpnet_simple.has_edge(u, v):
                 cpnet_simple[u][v]['weight'] += w
